@@ -11,6 +11,9 @@ export declare class PublicService {
     private attempts;
     private aliasAttempts;
     constructor(db: DataSource, admin: AdminService, reports: ReportsService, jwt: JwtService);
+    aliases(ip: string): Promise<{
+        alias: string;
+    }[]>;
     aliasLogin(aliasInput: unknown, pin: unknown, ip: string): Promise<{
         accessToken: string;
     }>;
@@ -54,6 +57,9 @@ export declare class AliasController {
     private readonly service;
     private readonly reports;
     constructor(service: PublicService, reports: ReportsService);
+    aliases(req: Request): Promise<{
+        alias: string;
+    }[]>;
     login(body: {
         alias: unknown;
         pin: unknown;

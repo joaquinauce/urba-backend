@@ -15,6 +15,12 @@ export class PublicService {
   private attempts = new Map<string,{count:number;until:number}>();
   private aliasAttempts = new Map<string,{count:number;until:number}>();
   constructor(@Inject(DB) private readonly db:DataSource,private readonly admin:AdminService,private readonly reports:ReportsService,private readonly jwt:JwtService) {}
+  async aliases(ip:string):Promise<{alias:string}[]> {
+    this.limit(ip);
+    return this.db.query(`SELECT w.access_alias AS alias FROM works w JOIN foremen f ON f.id=w.foreman_id
+      WHERE w.access_alias IS NOT NULL AND w.status='ACTIVA' AND f.is_active=true
+      ORDER BY w.access_alias`);
+  }
   async aliasLogin(aliasInput:unknown,pin:unknown,ip:string) {
     this.limit(ip);
     const alias = normalizeAlias(aliasInput);
@@ -85,6 +91,7 @@ export class PublicService {
 @Controller('public')
 export class AliasController {
   constructor(private readonly service:PublicService,private readonly reports:ReportsService) {}
+  @Get('aliases') aliases(@Req() req:Request) {return this.service.aliases(req.ip??'unknown');}
   @Post('alias/login') login(@Body() body:{alias:unknown;pin:unknown},@Req() req:Request) {return this.service.aliasLogin(body?.alias,body?.pin,req.ip??'unknown');}
   @Get('session/today') async today(@Req() req:Request) {return this.service.todayFor(await this.service.session(req));}
   @Post('session/reports') async submit(@Req() req:Request,@Body() body:any) {return this.reports.submit(await this.service.session(req),body);}

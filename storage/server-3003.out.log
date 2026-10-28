@@ -1,0 +1,46 @@
+[Nest] 44944  - 28/10/2026, 02:35:10     LOG [NestFactory] Starting Nest application...
+[Nest] 44944  - 28/10/2026, 02:35:10     LOG [InstanceLoader] ConfigHostModule dependencies initialized +16ms
+[Nest] 44944  - 28/10/2026, 02:35:10     LOG [InstanceLoader] JwtModule dependencies initialized +0ms
+[Nest] 44944  - 28/10/2026, 02:35:10     LOG [InstanceLoader] ConfigModule dependencies initialized +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [InstanceLoader] DatabaseModule dependencies initialized +270ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [InstanceLoader] AppModule dependencies initialized +2ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RoutesResolver] HealthController {/api/health}: +179ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/health, GET} route +2ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RoutesResolver] AuthController {/api/auth}: +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/auth/login, POST} route +1ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/auth/me, GET} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RoutesResolver] AdminController {/api/admin}: +1ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/foremen, GET} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/foremen, POST} route +1ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/foremen/:id, PATCH} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/works, GET} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/works, POST} route +1ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/works/:id, PATCH} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/works/:id/rotate-code, POST} route +1ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/works/:id, GET} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/works/:id/goals, GET} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/works/:id/goals, POST} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/works/:id/goals/:goalId, PATCH} route +1ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/works/:id/goals/copy, POST} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/works/:id/recurrences, GET} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/works/:id/recurrences/:recurrenceId, DELETE} route +1ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/dashboard, GET} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RoutesResolver] PublicController {/api/public/works/:code}: +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/public/works/:code/today, GET} route +1ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/public/works/:code/reports, POST} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/public/works/:code/reports/:reportId/photos, POST} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/public/works/:code/photos/:id, GET} route +1ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RoutesResolver] AliasController {/api/public}: +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/public/aliases, GET} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/public/alias/login, POST} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/public/session/today, GET} route +1ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/public/session/reports, POST} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/public/session/reports/:reportId/photos, POST} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/public/session/photos/:id, GET} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RoutesResolver] ReportsController {/api/admin}: +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/works/:id/reports, GET} route +1ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/reports/:id, GET} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/reports/:id, PATCH} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/reports/:id/photos, POST} route +1ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [RouterExplorer] Mapped {/api/admin/photos/:id, GET} route +0ms
+[Nest] 44944  - 28/10/2026, 02:35:11     LOG [NestApplication] Nest application successfully started +1ms

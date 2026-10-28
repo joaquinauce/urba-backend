@@ -32,6 +32,12 @@ let PublicService = class PublicService {
         this.reports = reports;
         this.jwt = jwt;
     }
+    async aliases(ip) {
+        this.limit(ip);
+        return this.db.query(`SELECT w.access_alias AS alias FROM works w JOIN foremen f ON f.id=w.foreman_id
+      WHERE w.access_alias IS NOT NULL AND w.status='ACTIVA' AND f.is_active=true
+      ORDER BY w.access_alias`);
+    }
     async aliasLogin(aliasInput, pin, ip) {
         this.limit(ip);
         const alias = normalizeAlias(aliasInput);
@@ -129,12 +135,20 @@ let AliasController = class AliasController {
         this.service = service;
         this.reports = reports;
     }
+    aliases(req) { return this.service.aliases(req.ip ?? 'unknown'); }
     login(body, req) { return this.service.aliasLogin(body?.alias, body?.pin, req.ip ?? 'unknown'); }
     async today(req) { return this.service.todayFor(await this.service.session(req)); }
     async submit(req, body) { return this.reports.submit(await this.service.session(req), body); }
     async upload(req, id, file) { const work = await this.service.session(req); return this.reports.uploadPhoto(work.administrator_id, id, file, work); }
     async photo(req, id, res) { const work = await this.service.session(req); res.type('image/webp').send(await this.reports.photo(work.administrator_id, id, work.id)); }
 };
+__decorate([
+    Get('aliases'),
+    __param(0, Req()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object]),
+    __metadata("design:returntype", void 0)
+], AliasController.prototype, "aliases", null);
 __decorate([
     Post('alias/login'),
     __param(0, Body()),
