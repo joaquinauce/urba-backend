@@ -18,7 +18,7 @@ import { resolve, join } from 'node:path';
 import { DB } from './database.module.js';
 import { JwtGuard } from './auth.js';
 import { AdminService } from './admin.js';
-import { localNow, nonnegative, one, optional, reportSummary, uuid } from './shared.js';
+import { localNow, one, optional, quantityForUnit, reportSummary, uuid } from './shared.js';
 let ReportsService = class ReportsService {
     db;
     admin;
@@ -48,7 +48,10 @@ let ReportsService = class ReportsService {
             for (const item of body.items) {
                 if (!item || typeof item.goalId !== 'string' || supplied.has(item.goalId))
                     throw new BadRequestException('Objetivos duplicados o inválidos');
-                supplied.set(item.goalId, nonnegative(item.actualQuantity, 'Cantidad realizada'));
+                const goal = goals.find((candidate) => candidate.id === item.goalId);
+                if (!goal)
+                    throw new BadRequestException('Objetivo inexistente');
+                supplied.set(item.goalId, quantityForUnit(item.actualQuantity, goal.unit, 'Cantidad realizada'));
             }
             if (supplied.size !== goals.length || goals.some((goal) => !supplied.has(goal.id)))
                 throw new BadRequestException('Informá todos los objetivos del día');
@@ -92,11 +95,15 @@ let ReportsService = class ReportsService {
                 if (!Array.isArray(body.items))
                     throw new BadRequestException('Ítems inválidos');
                 const ids = new Set();
+                const units = new Map((await tx.query('SELECT id,unit_snapshot FROM daily_report_items WHERE report_id=$1', [reportId])).map((row) => [row.id, row.unit_snapshot]));
                 for (const item of body.items) {
                     if (!item || typeof item.id !== 'string' || ids.has(item.id))
                         throw new BadRequestException('Ítems duplicados o inválidos');
                     ids.add(item.id);
-                    const rows = await tx.query('UPDATE daily_report_items SET actual_quantity=$3,updated_at=now() WHERE report_id=$1 AND id=$2 RETURNING id', [reportId, item.id, nonnegative(item.actualQuantity, 'Cantidad realizada')]);
+                    const unit = units.get(item.id);
+                    if (!unit)
+                        throw new BadRequestException('Ítem inexistente');
+                    const rows = await tx.query('UPDATE daily_report_items SET actual_quantity=$3,updated_at=now() WHERE report_id=$1 AND id=$2 RETURNING id', [reportId, item.id, quantityForUnit(item.actualQuantity, unit, 'Cantidad realizada')]);
                     if (!rows.length)
                         throw new BadRequestException('Ítem inexistente');
                 }

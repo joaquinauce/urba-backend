@@ -60,6 +60,7 @@ export declare class AdminService {
     dashboard(adminId: string): Promise<any[]>;
     workDetail(adminId: string, workId: string): Promise<{
         today: string;
+        todayTime: string;
         work: {
             id: string;
             name: string;
@@ -99,6 +100,7 @@ export declare class AdminController {
     }>;
     detail(req: AdminRequest, id: string): Promise<{
         today: string;
+        todayTime: string;
         work: {
             id: string;
             name: string;

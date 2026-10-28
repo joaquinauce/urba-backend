@@ -4,7 +4,7 @@ import QRCode from 'qrcode';
 import { DB } from './database.module.js';
 import { JwtGuard } from './auth.js';
 import type { AdminRequest } from './auth.js';
-import { code, codeHash, localNow, number, one, optional, percentage, positive, reportSummary, required, uuid, validDate, validUnit, type Db } from './shared.js';
+import { code, codeHash, localNow, number, one, optional, percentage, quantityForUnit, reportSummary, required, uuid, validDate, validUnit, type Db } from './shared.js';
 
 type Work = { id: string; administrator_id: string; foreman_id: string; name: string; description: string | null; location: string | null; start_date: string; estimated_end_date: string; status: string; time_zone: string; close_time: string };
 type GoalInput = { date?: string; description?: string; expectedQuantity?: number; unit?: string; customUnit?: string; activityId?: string; recurrence?: { startsOn: string; endsOn: string; daysMask: number } };
@@ -42,7 +42,7 @@ export class AdminService {
     void foreman;
     const status = body.status ?? 'ACTIVA';
     if (!['ACTIVA', 'PAUSADA', 'FINALIZADA'].includes(status)) throw new BadRequestException('Estado inválido');
-    const timeZone = body.timeZone ?? 'America/Argentina/Buenos_Aires';
+    const timeZone = body.timeZone ?? 'America/Argentina/Cordoba';
     localNow(timeZone);
     const closeTime = body.closeTime ?? '19:00';
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(closeTime)) throw new BadRequestException('Hora de cierre inválida');
@@ -106,8 +106,8 @@ export class AdminService {
   async createGoal(adminId: string, workId: string, body: GoalInput) {
     await this.work(adminId,workId);
     const description = required(body.description,'Descripción');
-    const expected = positive(body.expectedQuantity,'Meta');
     const {unit,customUnit} = validUnit(body.unit,body.customUnit);
+    const expected = quantityForUnit(body.expectedQuantity,unit,'Meta',true);
     return this.db.transaction(async tx => {
       await tx.query('SELECT id FROM works WHERE administrator_id=$1 AND id=$2 FOR UPDATE',[adminId,workId]);
       let activityId = body.activityId;
@@ -142,7 +142,7 @@ export class AdminService {
       const reported = await tx.query('SELECT 1 FROM daily_reports WHERE work_id=$1 AND work_date=$2',[workId,goal.work_date]);
       if (reported.length) throw new BadRequestException('El objetivo ya fue informado');
       const description = required(body.description ?? goal.description,'Descripción');
-      const expected = positive(body.expectedQuantity ?? goal.expected_quantity,'Meta');
+      const expected = quantityForUnit(body.expectedQuantity ?? goal.expected_quantity,goal.unit,'Meta',true);
       return one(tx,'UPDATE daily_goals SET description=$4,expected_quantity=$5,is_active=$6,updated_at=now() WHERE administrator_id=$1 AND work_id=$2 AND id=$3 RETURNING id,description,expected_quantity AS "expectedQuantity",is_active AS "isActive"',[adminId,workId,goalId,description,expected,body.isActive ?? goal.is_active]);
     });
   }
@@ -197,14 +197,14 @@ export class AdminService {
         FROM daily_goals g LEFT JOIN daily_report_items i ON i.goal_id=g.id
         WHERE g.work_id=$1 AND g.work_date<=$2 AND g.is_active=true GROUP BY g.activity_id`,[work.id,date]);
       const deviations=deviationRows.map((row:any)=>({activityId:row.activity_id,planned:number(row.planned),executed:number(row.executed),difference:number(row.executed)-number(row.planned)}));
-      result.push({ id:work.id,name:work.name,foremanName:work.foreman_name,estimatedEndDate:work.estimated_end_date,daysRemaining,compliance,average7: averages.length ? Math.round(averages.reduce((a,b)=>a+b,0)/averages.length) : null,reportStatus:status,hasReport:!!today,deviations });
+      result.push({ id:work.id,name:work.name,foremanName:work.foreman_name,today:date,timeZone:work.time_zone,estimatedEndDate:work.estimated_end_date,daysRemaining,compliance,average7: averages.length ? Math.round(averages.reduce((a,b)=>a+b,0)/averages.length) : null,reportStatus:status,hasReport:!!today,deviations });
     }
     const order: Record<string,number> = {NEGRO:0,ROJO:1,AMARILLO:2,GRIS:3,SIN_OBJETIVOS:4,VERDE:5};
     return result.sort((a,b)=>order[a.reportStatus]-order[b.reportStatus] || a.name.localeCompare(b.name));
   }
   async workDetail(adminId: string, workId: string) {
     const work = await this.work(adminId,workId);
-    const today = localNow(work.time_zone).date;
+    const {date:today,time:todayTime} = localNow(work.time_zone);
     await this.materializeAll(adminId,workId);
     const goals = await this.db.query('SELECT id,activity_id AS "activityId",work_date AS date,description,expected_quantity AS "expectedQuantity",unit FROM daily_goals WHERE administrator_id=$1 AND work_id=$2 AND is_active=true ORDER BY work_date DESC',[adminId,workId]);
     const reports = await this.db.query('SELECT id,work_date AS date,foreman_name_snapshot AS "foremanName",observations,submitted_at AS "submittedAt",updated_at AS "updatedAt" FROM daily_reports WHERE administrator_id=$1 AND work_id=$2 ORDER BY work_date DESC',[adminId,workId]);
@@ -221,7 +221,7 @@ export class AdminService {
       const projectedDays = rate && rate>0 ? Math.ceil(Math.max(0,planned+remaining-executed)/rate) : null;
       return {activityId:activity.id,name:activity.name,unit:activity.unit,planned,executed,difference:executed-planned,compliance:planned>0?Math.round(percentage(executed,planned)):null,projectedDays,risk: projectedDays !== null && projectedDays > Math.ceil((Date.parse(`${work.estimated_end_date}T12:00:00Z`)-Date.parse(`${today}T12:00:00Z`))/86400000)};
     });
-    return { today,work:{id:work.id,name:work.name,description:work.description,location:work.location,startDate:work.start_date,estimatedEndDate:work.estimated_end_date,status:work.status,foremanId:work.foreman_id,timeZone:work.time_zone,closeTime:work.close_time},goals,reports,items,photos,corrections,progress,activities };
+    return { today,todayTime,work:{id:work.id,name:work.name,description:work.description,location:work.location,startDate:work.start_date,estimatedEndDate:work.estimated_end_date,status:work.status,foremanId:work.foreman_id,timeZone:work.time_zone,closeTime:work.close_time},goals,reports,items,photos,corrections,progress,activities };
   }
 }
 

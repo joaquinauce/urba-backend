@@ -4,9 +4,11 @@ export declare const uuid: () => `${string}-${string}-${string}-${string}-${stri
 export declare const code: () => string;
 export declare const codeHash: (value: string) => string;
 export declare const units: readonly ["UNIDADES", "METROS", "METROS_CUADRADOS", "METROS_CUBICOS", "KILOGRAMOS", "HORAS", "PORCENTAJE", "OTRA"];
+export declare const quantityDecimals: Record<string, number>;
 export declare function validDate(value: string): string;
 export declare function positive(value: unknown, field?: string): number;
 export declare function nonnegative(value: unknown, field?: string): number;
+export declare function quantityForUnit(value: unknown, unit: string, field: string, mustBePositive?: boolean): number;
 export declare function required(value: unknown, field: string, max?: number): string;
 export declare function optional(value: unknown, max?: number): string | null;
 export declare function validUnit(unit: unknown, custom: unknown): {
@@ -14,7 +16,7 @@ export declare function validUnit(unit: unknown, custom: unknown): {
     customUnit: string | null;
 };
 export declare function one<T = any>(db: Db, sql: string, params?: unknown[]): Promise<T>;
-export declare function localNow(timeZone: string): {
+export declare function localNow(timeZone: string, now?: Date): {
     date: string;
     time: string;
 };

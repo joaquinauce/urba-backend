@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { code, codeHash, localNow, nonnegative, percentage, reportSummary, validDate } from './shared.js';
+import { code, codeHash, localNow, nonnegative, percentage, quantityForUnit, reportSummary, validDate } from './shared.js';
 
 describe('reglas críticas de informes', () => {
   it('acepta cero realizado, rechaza negativos y conserva sobrecumplimiento individual', () => {
@@ -16,6 +16,20 @@ describe('reglas críticas de informes', () => {
     expect(localNow('America/Argentina/Buenos_Aires').date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(() => validDate('2026-02-30')).toThrow();
     expect(validDate('2026-10-27')).toBe('2026-10-27');
+  });
+  it('separa el día argentino del día de una obra en Kiritimati', () => {
+    const instant = new Date('2026-10-28T12:00:00Z');
+    expect(localNow('America/Argentina/Cordoba',instant)).toEqual({date:'2026-10-28',time:'09:00'});
+    expect(localNow('Pacific/Kiritimati',instant)).toEqual({date:'2026-10-29',time:'02:00'});
+  });
+  it('valida la precisión según la unidad sin redondear', () => {
+    expect(quantityForUnit(4,'UNIDADES','Cantidad')).toBe(4);
+    expect(() => quantityForUnit(4.001,'UNIDADES','Cantidad')).toThrow();
+    expect(quantityForUnit(125.50,'METROS','Cantidad')).toBe(125.5);
+    expect(() => quantityForUnit(125.501,'METROS','Cantidad')).toThrow();
+    expect(quantityForUnit(2.375,'METROS_CUBICOS','Cantidad')).toBe(2.375);
+    expect(quantityForUnit(1.5,'HORAS','Cantidad')).toBe(1.5);
+    expect(() => quantityForUnit(1.25,'HORAS','Cantidad')).toThrow();
   });
   it('genera códigos opacos de alta entropía y hashes estables', () => {
     const a=code(), b=code();
