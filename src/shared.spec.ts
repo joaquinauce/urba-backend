@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { code, codeHash, localNow, nonnegative, percentage, quantityForUnit, reportSummary, validDate } from './shared.js';
+import { code, codeHash, customQuantityConfig, localNow, nonnegative, percentage, quantityForUnit, reportSummary, validDate } from './shared.js';
+import { normalizeAlias } from './admin.js';
 
 describe('reglas críticas de informes', () => {
   it('acepta cero realizado, rechaza negativos y conserva sobrecumplimiento individual', () => {
@@ -37,5 +38,13 @@ describe('reglas críticas de informes', () => {
     expect(a).not.toBe(b);
     expect(codeHash(a)).toMatch(/^[0-9a-f]{64}$/);
     expect(codeHash(a)).toBe(codeHash(a));
+  });
+  it('normaliza alias y valida cantidades personalizadas sin redondear', () => {
+    expect(normalizeAlias('  iluminación-ciudad  ')).toBe('ILUMINACION-CIUDAD');
+    expect(() => normalizeAlias('alias inválido')).toThrow();
+    const config=customQuantityConfig('OTRA',0.25,2);
+    expect(quantityForUnit(2.5,'OTRA','Cantidad',false,config)).toBe(2.5);
+    expect(() => quantityForUnit(2.3,'OTRA','Cantidad',false,config)).toThrow();
+    expect(() => customQuantityConfig('OTRA',0.025,2)).toThrow();
   });
 });

@@ -1,13 +1,26 @@
-import { BadRequestException, Body, Controller, Delete, Get, Inject, Injectable, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, ConflictException, Controller, Delete, Get, Inject, Injectable, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import type { DataSource } from 'typeorm';
 import QRCode from 'qrcode';
+import { hash } from 'bcryptjs';
 import { DB } from './database.module.js';
 import { JwtGuard } from './auth.js';
 import type { AdminRequest } from './auth.js';
-import { code, codeHash, localNow, number, one, optional, percentage, quantityForUnit, reportSummary, required, uuid, validDate, validUnit, type Db } from './shared.js';
+import { code, codeHash, customQuantityConfig, localNow, number, one, optional, percentage, quantityForUnit, reportSummary, required, uuid, validDate, validUnit, type Db } from './shared.js';
 
 type Work = { id: string; administrator_id: string; foreman_id: string; name: string; description: string | null; location: string | null; start_date: string; estimated_end_date: string; status: string; time_zone: string; close_time: string };
-type GoalInput = { date?: string; description?: string; expectedQuantity?: number; unit?: string; customUnit?: string; activityId?: string; recurrence?: { startsOn: string; endsOn: string; daysMask: number } };
+type GoalInput = { date?: string; description?: string; expectedQuantity?: number; unit?: string; customUnit?: string; quantityStep?: number; quantityDecimals?: number; activityId?: string; recurrence?: { startsOn: string; endsOn: string; daysMask: number } };
+
+export function normalizeAlias(value: unknown): string | null {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value !== 'string') throw new BadRequestException('Alias inválido');
+  const alias = value.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+  if (!/^[A-Z0-9]+(?:-[A-Z0-9]+)*$/.test(alias) || alias.length < 4 || alias.length > 40) throw new BadRequestException('El alias debe tener 4 a 40 letras, números o guiones');
+  return alias;
+}
+function validPin(value: unknown): string {
+  if (typeof value !== 'string' || !/^\d{6}$/.test(value)) throw new BadRequestException('El PIN debe tener 6 dígitos');
+  return value;
+}
 
 @Injectable()
 export class AdminService {
@@ -26,7 +39,7 @@ export class AdminService {
     return one(this.db, 'INSERT INTO foremen(id,administrator_id,first_name,last_name,phone,is_active) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,first_name AS "firstName",last_name AS "lastName",phone,is_active AS "isActive"', [uuid(), adminId, first, last, phone, body.isActive !== false]);
   }
   async works(adminId: string) {
-    return this.db.query(`SELECT w.id,w.name,w.description,w.location,w.start_date AS "startDate",w.estimated_end_date AS "estimatedEndDate",w.status,w.time_zone AS "timeZone",w.close_time AS "closeTime",w.foreman_id AS "foremanId",f.first_name||' '||f.last_name AS "foremanName" FROM works w JOIN foremen f ON f.id=w.foreman_id WHERE w.administrator_id=$1 ORDER BY CASE w.status WHEN 'ACTIVA' THEN 0 WHEN 'PAUSADA' THEN 1 ELSE 2 END,w.name`, [adminId]);
+    return this.db.query(`SELECT w.id,w.name,w.description,w.location,w.start_date AS "startDate",w.estimated_end_date AS "estimatedEndDate",w.status,w.time_zone AS "timeZone",w.close_time AS "closeTime",w.foreman_id AS "foremanId",w.access_alias AS "accessAlias",f.first_name||' '||f.last_name AS "foremanName" FROM works w JOIN foremen f ON f.id=w.foreman_id WHERE w.administrator_id=$1 ORDER BY CASE w.status WHEN 'ACTIVA' THEN 0 WHEN 'PAUSADA' THEN 1 ELSE 2 END,w.name`, [adminId]);
   }
   async work(adminId: string, id: string, db: Db = this.db): Promise<Work> {
     return one<Work>(db, 'SELECT * FROM works WHERE administrator_id=$1 AND id=$2', [adminId, id]);
@@ -46,13 +59,25 @@ export class AdminService {
     localNow(timeZone);
     const closeTime = body.closeTime ?? '19:00';
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(closeTime)) throw new BadRequestException('Hora de cierre inválida');
+    const alias = normalizeAlias(body.accessAlias);
     if (id) {
-      await this.work(adminId, id);
-      return one(this.db, `UPDATE works SET foreman_id=$3,name=$4,description=$5,location=$6,start_date=$7,estimated_end_date=$8,status=$9,time_zone=$10,close_time=$11,updated_at=now() WHERE administrator_id=$1 AND id=$2 RETURNING id,name,status`, [adminId,id,body.foremanId,name,description,location,start,end,status,timeZone,closeTime]);
+      const previous = await this.work(adminId, id) as Work & {access_alias:string|null;alias_pin_hash:string|null};
+      const effectiveAlias = body.accessAlias === undefined ? previous.access_alias : alias;
+      const pinChanged = body.aliasPin !== undefined && body.aliasPin !== '';
+      if (effectiveAlias && !pinChanged && !previous.alias_pin_hash) throw new BadRequestException('Definí un PIN para habilitar el alias');
+      const pinHash = effectiveAlias ? pinChanged ? await hash(validPin(body.aliasPin),12) : previous.alias_pin_hash : null;
+      const revoke = effectiveAlias !== previous.access_alias || pinChanged;
+      try {
+        return await one(this.db, `UPDATE works SET foreman_id=$3,name=$4,description=$5,location=$6,start_date=$7,estimated_end_date=$8,status=$9,time_zone=$10,close_time=$11,access_alias=$12,alias_pin_hash=$13,alias_session_version=alias_session_version+$14,updated_at=now() WHERE administrator_id=$1 AND id=$2 RETURNING id,name,status,access_alias AS "accessAlias"`, [adminId,id,body.foremanId,name,description,location,start,end,status,timeZone,closeTime,effectiveAlias,pinHash,revoke?1:0]);
+      } catch (error) { if ((error as {code?:string}).code === '23505') throw new ConflictException('Ese alias ya está en uso'); throw error; }
     }
+    if (alias && !body.aliasPin) throw new BadRequestException('Definí un PIN para habilitar el alias');
+    const pinHash = alias ? await hash(validPin(body.aliasPin),12) : null;
     const accessCode = code();
     const workId = uuid();
-    await this.db.query(`INSERT INTO works(id,administrator_id,foreman_id,name,description,location,start_date,estimated_end_date,status,time_zone,close_time,access_code_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, [workId,adminId,body.foremanId,name,description,location,start,end,status,timeZone,closeTime,codeHash(accessCode)]);
+    try {
+      await this.db.query(`INSERT INTO works(id,administrator_id,foreman_id,name,description,location,start_date,estimated_end_date,status,time_zone,close_time,access_code_hash,access_alias,alias_pin_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, [workId,adminId,body.foremanId,name,description,location,start,end,status,timeZone,closeTime,codeHash(accessCode),alias,pinHash]);
+    } catch (error) { if ((error as {code?:string}).code === '23505') throw new ConflictException('Ese alias ya está en uso'); throw error; }
     return this.accessResult(workId, name, accessCode);
   }
   private async accessResult(id: string, name: string, accessCode: string) {
@@ -74,8 +99,8 @@ export class AdminService {
     });
     const weekday = new Date(`${date}T12:00:00Z`).getUTCDay();
     const bit = 1 << ((weekday + 6) % 7);
-    await db.query(`INSERT INTO daily_goals(id,administrator_id,work_id,activity_id,recurrence_id,work_date,description,expected_quantity,unit,custom_unit)
-      SELECT gen_random_uuid(),r.administrator_id,r.work_id,r.activity_id,r.id,$3,r.description,r.expected_quantity,a.unit,a.custom_unit
+    await db.query(`INSERT INTO daily_goals(id,administrator_id,work_id,activity_id,recurrence_id,work_date,description,expected_quantity,unit,custom_unit,quantity_step,quantity_decimals)
+      SELECT gen_random_uuid(),r.administrator_id,r.work_id,r.activity_id,r.id,$3,r.description,r.expected_quantity,a.unit,a.custom_unit,a.quantity_step,a.quantity_decimals
       FROM goal_recurrences r JOIN activities a ON a.id=r.activity_id
       WHERE r.administrator_id=$1 AND r.work_id=$2 AND r.is_active=true AND $3::date BETWEEN r.starts_on AND r.ends_on AND (r.days_mask & $4)<>0
         AND NOT EXISTS (SELECT 1 FROM daily_reports reported WHERE reported.work_id=r.work_id AND reported.work_date=$3::date)
@@ -84,8 +109,8 @@ export class AdminService {
   async materializeAll(adminId: string, workId: string) {
     await this.db.transaction(async tx => {
       await tx.query('SELECT id FROM works WHERE administrator_id=$1 AND id=$2 FOR UPDATE',[adminId,workId]);
-      await tx.query(`INSERT INTO daily_goals(id,administrator_id,work_id,activity_id,recurrence_id,work_date,description,expected_quantity,unit,custom_unit)
-      SELECT gen_random_uuid(),r.administrator_id,r.work_id,r.activity_id,r.id,days.day::date,r.description,r.expected_quantity,a.unit,a.custom_unit
+      await tx.query(`INSERT INTO daily_goals(id,administrator_id,work_id,activity_id,recurrence_id,work_date,description,expected_quantity,unit,custom_unit,quantity_step,quantity_decimals)
+      SELECT gen_random_uuid(),r.administrator_id,r.work_id,r.activity_id,r.id,days.day::date,r.description,r.expected_quantity,a.unit,a.custom_unit,a.quantity_step,a.quantity_decimals
       FROM goal_recurrences r JOIN activities a ON a.id=r.activity_id
       CROSS JOIN LATERAL generate_series(r.starts_on,r.ends_on,interval '1 day') AS days(day)
       WHERE r.administrator_id=$1 AND r.work_id=$2 AND r.is_active=true
@@ -97,7 +122,7 @@ export class AdminService {
   async goals(adminId: string, workId: string, date: string) {
     await this.work(adminId,workId);
     await this.materialize(adminId,workId,date);
-    return this.db.query('SELECT id,activity_id AS "activityId",recurrence_id AS "recurrenceId",work_date AS date,description,expected_quantity AS "expectedQuantity",unit,custom_unit AS "customUnit",is_active AS "isActive" FROM daily_goals WHERE administrator_id=$1 AND work_id=$2 AND work_date=$3 ORDER BY created_at,id', [adminId,workId,date]);
+    return this.db.query('SELECT id,activity_id AS "activityId",recurrence_id AS "recurrenceId",work_date AS date,description,expected_quantity AS "expectedQuantity",unit,custom_unit AS "customUnit",quantity_step AS "quantityStep",quantity_decimals AS "quantityDecimals",is_active AS "isActive" FROM daily_goals WHERE administrator_id=$1 AND work_id=$2 AND work_date=$3 ORDER BY created_at,id', [adminId,workId,date]);
   }
   async recurrences(adminId: string, workId: string) {
     await this.work(adminId,workId);
@@ -107,17 +132,21 @@ export class AdminService {
     await this.work(adminId,workId);
     const description = required(body.description,'Descripción');
     const {unit,customUnit} = validUnit(body.unit,body.customUnit);
-    const expected = quantityForUnit(body.expectedQuantity,unit,'Meta',true);
+    let config = customQuantityConfig(unit,body.quantityStep,body.quantityDecimals);
     return this.db.transaction(async tx => {
       await tx.query('SELECT id FROM works WHERE administrator_id=$1 AND id=$2 FOR UPDATE',[adminId,workId]);
       let activityId = body.activityId;
       if (activityId) {
-        const activity = await one<any>(tx,'SELECT id,unit,custom_unit FROM activities WHERE administrator_id=$1 AND work_id=$2 AND id=$3 AND is_active=true',[adminId,workId,activityId]);
+        const activity = await one<any>(tx,'SELECT id,unit,custom_unit,quantity_step,quantity_decimals FROM activities WHERE administrator_id=$1 AND work_id=$2 AND id=$3 AND is_active=true',[adminId,workId,activityId]);
         if (activity.unit !== unit || activity.custom_unit !== customUnit) throw new BadRequestException('La unidad de la actividad debe mantenerse');
+        const existing = customQuantityConfig(unit,activity.quantity_step,activity.quantity_decimals);
+        if (config && (config.step !== (existing?.step ?? 0.001) || config.decimals !== (existing?.decimals ?? 3))) throw new BadRequestException('El paso y decimales deben coincidir con la actividad');
+        config = existing;
       } else {
         activityId = uuid();
-        await tx.query('INSERT INTO activities(id,administrator_id,work_id,name,unit,custom_unit) VALUES($1,$2,$3,$4,$5,$6)',[activityId,adminId,workId,description,unit,customUnit]);
+        await tx.query('INSERT INTO activities(id,administrator_id,work_id,name,unit,custom_unit,quantity_step,quantity_decimals) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[activityId,adminId,workId,description,unit,customUnit,config?.step??null,config?.decimals??null]);
       }
+      const expected = quantityForUnit(body.expectedQuantity,unit,'Meta',true,config);
       if (body.recurrence) {
         const { startsOn, endsOn, daysMask } = body.recurrence;
         validDate(startsOn); validDate(endsOn);
@@ -131,7 +160,7 @@ export class AdminService {
       const reported = await tx.query('SELECT 1 FROM daily_reports WHERE administrator_id=$1 AND work_id=$2 AND work_date=$3',[adminId,workId,date]);
       if (reported.length) throw new BadRequestException('No se pueden agregar objetivos a un día informado');
       const id = uuid();
-      await tx.query('INSERT INTO daily_goals(id,administrator_id,work_id,activity_id,work_date,description,expected_quantity,unit,custom_unit) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',[id,adminId,workId,activityId,date,description,expected,unit,customUnit]);
+      await tx.query('INSERT INTO daily_goals(id,administrator_id,work_id,activity_id,work_date,description,expected_quantity,unit,custom_unit,quantity_step,quantity_decimals) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',[id,adminId,workId,activityId,date,description,expected,unit,customUnit,config?.step??null,config?.decimals??null]);
       return { id, activityId, recurrence: false };
     });
   }
@@ -142,7 +171,8 @@ export class AdminService {
       const reported = await tx.query('SELECT 1 FROM daily_reports WHERE work_id=$1 AND work_date=$2',[workId,goal.work_date]);
       if (reported.length) throw new BadRequestException('El objetivo ya fue informado');
       const description = required(body.description ?? goal.description,'Descripción');
-      const expected = quantityForUnit(body.expectedQuantity ?? goal.expected_quantity,goal.unit,'Meta',true);
+      const config = customQuantityConfig(goal.unit,goal.quantity_step,goal.quantity_decimals);
+      const expected = quantityForUnit(body.expectedQuantity ?? goal.expected_quantity,goal.unit,'Meta',true,config);
       return one(tx,'UPDATE daily_goals SET description=$4,expected_quantity=$5,is_active=$6,updated_at=now() WHERE administrator_id=$1 AND work_id=$2 AND id=$3 RETURNING id,description,expected_quantity AS "expectedQuantity",is_active AS "isActive"',[adminId,workId,goalId,description,expected,body.isActive ?? goal.is_active]);
     });
   }
@@ -165,8 +195,8 @@ export class AdminService {
       await tx.query('SELECT id FROM works WHERE administrator_id=$1 AND id=$2 FOR UPDATE',[adminId,workId]);
       const reported = await tx.query('SELECT 1 FROM daily_reports WHERE work_id=$1 AND work_date=$2',[workId,date]);
       if (reported.length) throw new BadRequestException('El día ya fue informado');
-      const result = await tx.query(`INSERT INTO daily_goals(id,administrator_id,work_id,activity_id,work_date,description,expected_quantity,unit,custom_unit)
-        SELECT gen_random_uuid(),administrator_id,work_id,activity_id,$3,description,expected_quantity,unit,custom_unit FROM daily_goals
+      const result = await tx.query(`INSERT INTO daily_goals(id,administrator_id,work_id,activity_id,work_date,description,expected_quantity,unit,custom_unit,quantity_step,quantity_decimals)
+        SELECT gen_random_uuid(),administrator_id,work_id,activity_id,$3,description,expected_quantity,unit,custom_unit,quantity_step,quantity_decimals FROM daily_goals
         WHERE administrator_id=$1 AND work_id=$2 AND work_date=$4 AND is_active=true
         AND NOT EXISTS (SELECT 1 FROM daily_goals target WHERE target.work_id=$2 AND target.work_date=$3 AND target.activity_id=daily_goals.activity_id AND target.description=daily_goals.description)
         RETURNING id`,[adminId,workId,date,prev]);
@@ -206,9 +236,9 @@ export class AdminService {
     const work = await this.work(adminId,workId);
     const {date:today,time:todayTime} = localNow(work.time_zone);
     await this.materializeAll(adminId,workId);
-    const goals = await this.db.query('SELECT id,activity_id AS "activityId",work_date AS date,description,expected_quantity AS "expectedQuantity",unit FROM daily_goals WHERE administrator_id=$1 AND work_id=$2 AND is_active=true ORDER BY work_date DESC',[adminId,workId]);
+    const goals = await this.db.query('SELECT id,activity_id AS "activityId",work_date AS date,description,expected_quantity AS "expectedQuantity",unit,quantity_step AS "quantityStep",quantity_decimals AS "quantityDecimals" FROM daily_goals WHERE administrator_id=$1 AND work_id=$2 AND is_active=true ORDER BY work_date DESC',[adminId,workId]);
     const reports = await this.db.query('SELECT id,work_date AS date,foreman_name_snapshot AS "foremanName",observations,submitted_at AS "submittedAt",updated_at AS "updatedAt" FROM daily_reports WHERE administrator_id=$1 AND work_id=$2 ORDER BY work_date DESC',[adminId,workId]);
-    const activities = await this.db.query('SELECT id,name,unit,custom_unit AS "customUnit" FROM activities WHERE administrator_id=$1 AND work_id=$2',[adminId,workId]);
+    const activities = await this.db.query('SELECT id,name,unit,custom_unit AS "customUnit",quantity_step AS "quantityStep",quantity_decimals AS "quantityDecimals" FROM activities WHERE administrator_id=$1 AND work_id=$2',[adminId,workId]);
     const items = await this.db.query(`SELECT i.report_id AS "reportId",i.activity_id AS "activityId",i.goal_id AS "goalId",i.description_snapshot AS description,i.expected_quantity_snapshot AS expected,i.actual_quantity AS actual,i.unit_snapshot AS unit,r.work_date AS date FROM daily_report_items i JOIN daily_reports r ON r.id=i.report_id WHERE i.administrator_id=$1 AND i.work_id=$2 ORDER BY r.work_date DESC`,[adminId,workId]);
     const photos = await this.db.query('SELECT p.id,p.report_id AS "reportId" FROM report_photos p WHERE p.administrator_id=$1 AND p.work_id=$2',[adminId,workId]);
     const corrections = await this.db.query('SELECT id,report_id AS "reportId",before_value AS before,after_value AS after,reason,created_at AS "createdAt" FROM report_corrections WHERE administrator_id=$1 AND work_id=$2 ORDER BY created_at DESC',[adminId,workId]);
@@ -221,7 +251,7 @@ export class AdminService {
       const projectedDays = rate && rate>0 ? Math.ceil(Math.max(0,planned+remaining-executed)/rate) : null;
       return {activityId:activity.id,name:activity.name,unit:activity.unit,planned,executed,difference:executed-planned,compliance:planned>0?Math.round(percentage(executed,planned)):null,projectedDays,risk: projectedDays !== null && projectedDays > Math.ceil((Date.parse(`${work.estimated_end_date}T12:00:00Z`)-Date.parse(`${today}T12:00:00Z`))/86400000)};
     });
-    return { today,todayTime,work:{id:work.id,name:work.name,description:work.description,location:work.location,startDate:work.start_date,estimatedEndDate:work.estimated_end_date,status:work.status,foremanId:work.foreman_id,timeZone:work.time_zone,closeTime:work.close_time},goals,reports,items,photos,corrections,progress,activities };
+    return { today,todayTime,work:{id:work.id,name:work.name,description:work.description,location:work.location,startDate:work.start_date,estimatedEndDate:work.estimated_end_date,status:work.status,foremanId:work.foreman_id,timeZone:work.time_zone,closeTime:work.close_time,accessAlias:(work as Work & {access_alias:string|null}).access_alias},goals,reports,items,photos,corrections,progress,activities };
   }
 }
 

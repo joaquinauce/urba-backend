@@ -20,6 +20,8 @@ type GoalInput = {
     expectedQuantity?: number;
     unit?: string;
     customUnit?: string;
+    quantityStep?: number;
+    quantityDecimals?: number;
     activityId?: string;
     recurrence?: {
         startsOn: string;
@@ -27,6 +29,7 @@ type GoalInput = {
         daysMask: number;
     };
 };
+export declare function normalizeAlias(value: unknown): string | null;
 export declare class AdminService {
     private readonly db;
     constructor(db: DataSource);
@@ -72,6 +75,7 @@ export declare class AdminService {
             foremanId: string;
             timeZone: string;
             closeTime: string;
+            accessAlias: string | null;
         };
         goals: any;
         reports: any;
@@ -112,6 +116,7 @@ export declare class AdminController {
             foremanId: string;
             timeZone: string;
             closeTime: string;
+            accessAlias: string | null;
         };
         goals: any;
         reports: any;

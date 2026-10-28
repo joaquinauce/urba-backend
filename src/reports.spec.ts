@@ -36,7 +36,7 @@ describe('envío diario',()=>{
     const {service,writes}=setup();
     const result=await service.submit(work,{observations:'',items:[{goalId:'goal-1',actualQuantity:0},{goalId:'goal-2',actualQuantity:600}]});
     expect(result.compliance).toBe(50);
-    expect(writes.filter(w=>w.sql.startsWith('INSERT INTO daily_report_items')).map(w=>w.params.at(-1))).toEqual([0,600]);
+    expect(writes.filter(w=>w.sql.startsWith('INSERT INTO daily_report_items')).map(w=>w.params[11])).toEqual([0,600]);
     expect(writes.find(w=>w.sql.startsWith('INSERT INTO daily_reports'))?.sql).toContain('ON CONFLICT (work_id,work_date)');
   });
   it('rechaza informes incompletos antes de escribir',async()=>{

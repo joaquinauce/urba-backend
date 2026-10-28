@@ -4,7 +4,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { DatabaseModule } from './database.module.js';
 import { AuthController, AuthService, JwtGuard } from './auth.js';
 import { AdminController, AdminService } from './admin.js';
-import { PublicController, PublicService } from './public.js';
+import { AliasController, PublicController, PublicService } from './public.js';
 import { ReportsController, ReportsService } from './reports.js';
 import { HealthController } from './health.js';
 
@@ -18,7 +18,7 @@ import { HealthController } from './health.js';
     } }),
     DatabaseModule,
   ],
-  controllers: [HealthController, AuthController, AdminController, PublicController, ReportsController],
+  controllers: [HealthController, AuthController, AdminController, PublicController, AliasController, ReportsController],
   providers: [AuthService, JwtGuard, AdminService, PublicService, ReportsService],
 })
 export class AppModule {}

@@ -5,10 +5,15 @@ export declare const code: () => string;
 export declare const codeHash: (value: string) => string;
 export declare const units: readonly ["UNIDADES", "METROS", "METROS_CUADRADOS", "METROS_CUBICOS", "KILOGRAMOS", "HORAS", "PORCENTAJE", "OTRA"];
 export declare const quantityDecimals: Record<string, number>;
+export type QuantityConfig = {
+    step: number;
+    decimals: number;
+};
+export declare function customQuantityConfig(unit: string, step: unknown, decimals: unknown): QuantityConfig | null;
 export declare function validDate(value: string): string;
 export declare function positive(value: unknown, field?: string): number;
 export declare function nonnegative(value: unknown, field?: string): number;
-export declare function quantityForUnit(value: unknown, unit: string, field: string, mustBePositive?: boolean): number;
+export declare function quantityForUnit(value: unknown, unit: string, field: string, mustBePositive?: boolean, custom?: QuantityConfig | null): number;
 export declare function required(value: unknown, field: string, max?: number): string;
 export declare function optional(value: unknown, max?: number): string | null;
 export declare function validUnit(unit: unknown, custom: unknown): {

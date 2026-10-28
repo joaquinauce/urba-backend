@@ -1,3 +1,4 @@
+import { JwtService } from '@nestjs/jwt';
 import type { Request, Response } from 'express';
 import type { DataSource } from 'typeorm';
 import { AdminService } from './admin.js';
@@ -6,11 +7,29 @@ export declare class PublicService {
     private readonly db;
     private readonly admin;
     private readonly reports;
+    private readonly jwt;
     private attempts;
-    constructor(db: DataSource, admin: AdminService, reports: ReportsService);
+    private aliasAttempts;
+    constructor(db: DataSource, admin: AdminService, reports: ReportsService, jwt: JwtService);
+    aliasLogin(aliasInput: unknown, pin: unknown, ip: string): Promise<{
+        accessToken: string;
+    }>;
+    session(req: Request): Promise<any>;
     private limit;
     resolve(code: string, ip: string): Promise<any>;
     today(code: string, ip: string): Promise<{
+        work: {
+            id: any;
+            name: any;
+            foremanName: any;
+        };
+        date: string;
+        goals: any;
+        report: any;
+        editable: boolean;
+        closeTime: any;
+    }>;
+    todayFor(work: any): Promise<{
         work: {
             id: any;
             name: any;
@@ -30,6 +49,37 @@ export declare class PublicService {
         mimeType: string;
     }>;
     photo(code: string, ip: string, photoId: string): Promise<Buffer<ArrayBufferLike>>;
+}
+export declare class AliasController {
+    private readonly service;
+    private readonly reports;
+    constructor(service: PublicService, reports: ReportsService);
+    login(body: {
+        alias: unknown;
+        pin: unknown;
+    }, req: Request): Promise<{
+        accessToken: string;
+    }>;
+    today(req: Request): Promise<{
+        work: {
+            id: any;
+            name: any;
+            foremanName: any;
+        };
+        date: string;
+        goals: any;
+        report: any;
+        editable: boolean;
+        closeTime: any;
+    }>;
+    submit(req: Request, body: any): Promise<any>;
+    upload(req: Request, id: string, file: Express.Multer.File): Promise<{
+        id: `${string}-${string}-${string}-${string}-${string}`;
+        width: number;
+        height: number;
+        mimeType: string;
+    }>;
+    photo(req: Request, id: string, res: Response): Promise<void>;
 }
 export declare class PublicController {
     private readonly service;

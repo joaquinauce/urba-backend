@@ -8,6 +8,16 @@ export const code = () => randomBytes(24).toString('base64url');
 export const codeHash = (value: string) => createHash('sha256').update(value).digest('hex');
 export const units = ['UNIDADES', 'METROS', 'METROS_CUADRADOS', 'METROS_CUBICOS', 'KILOGRAMOS', 'HORAS', 'PORCENTAJE', 'OTRA'] as const;
 export const quantityDecimals: Record<string, number> = { UNIDADES: 0, METROS: 2, METROS_CUADRADOS: 2, METROS_CUBICOS: 3, KILOGRAMOS: 2, HORAS: 1, PORCENTAJE: 0, OTRA: 3 };
+export type QuantityConfig = { step: number; decimals: number };
+export function customQuantityConfig(unit: string, step: unknown, decimals: unknown): QuantityConfig | null {
+  if (unit !== 'OTRA') return null;
+  if ((step === null || step === undefined || step === '') && (decimals === null || decimals === undefined || decimals === '')) return null;
+  const s = Number(step), d = Number(decimals);
+  if (!Number.isFinite(s) || s <= 0 || s > 99999999999 || !Number.isInteger(d) || d < 0 || d > 3 || Math.abs(Math.round(s * 10 ** d) - s * 10 ** d) > 1e-7) {
+    throw new BadRequestException('Para Otra, el paso debe ser positivo y compatible con 0 a 3 decimales');
+  }
+  return { step: s, decimals: d };
+}
 
 export function validDate(value: string): string {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value) ||
@@ -27,13 +37,14 @@ export function nonnegative(value: unknown, field = 'cantidad'): number {
   if (!Number.isFinite(n) || n < 0 || Math.abs(Math.round(n * 1000) - n * 1000) > 1e-7) throw new BadRequestException(`${field} no puede ser negativo y admite hasta tres decimales`);
   return n;
 }
-export function quantityForUnit(value: unknown, unit: string, field: string, mustBePositive = false): number {
+export function quantityForUnit(value: unknown, unit: string, field: string, mustBePositive = false, custom?: QuantityConfig | null): number {
   const n = mustBePositive ? positive(value, field) : nonnegative(value, field);
-  const decimals = quantityDecimals[unit];
+  const decimals = custom?.decimals ?? quantityDecimals[unit];
   if (decimals === undefined) throw new BadRequestException('Unidad inválida');
   const factor = 10 ** decimals;
-  if (Math.abs(Math.round(n * factor) - n * factor) > 1e-7 || (unit === 'HORAS' && Math.abs(Math.round(n * 2) - n * 2) > 1e-7)) {
-    throw new BadRequestException(`${field} admite ${decimals} decimal(es) para esta unidad${unit === 'HORAS' ? ' y pasos de 0,5' : ''}`);
+  const step = custom?.step ?? (unit === 'HORAS' ? 0.5 : null);
+  if (Math.abs(Math.round(n * factor) - n * factor) > 1e-7 || (step !== null && Math.abs(Math.round(n / step) - n / step) > 1e-7)) {
+    throw new BadRequestException(`${field} admite ${decimals} decimal(es) para esta unidad${step !== null ? ` y pasos de ${step}` : ''}`);
   }
   return n;
 }

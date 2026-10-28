@@ -9,7 +9,7 @@ import { DB } from './database.module.js';
 import { JwtGuard } from './auth.js';
 import type { AdminRequest } from './auth.js';
 import { AdminService } from './admin.js';
-import { localNow, one, optional, quantityForUnit, reportSummary, uuid, type Db } from './shared.js';
+import { customQuantityConfig, localNow, one, optional, quantityForUnit, reportSummary, uuid, type Db } from './shared.js';
 
 type Work = { id:string; administrator_id:string; foreman_id:string; time_zone:string; close_time:string; status:string };
 type Submission = { observations?:string; items:{ goalId:string; actualQuantity:number }[] };
@@ -36,7 +36,7 @@ export class ReportsService {
         if (!item || typeof item.goalId !== 'string' || supplied.has(item.goalId)) throw new BadRequestException('Objetivos duplicados o inválidos');
         const goal = goals.find((candidate:any) => candidate.id === item.goalId);
         if (!goal) throw new BadRequestException('Objetivo inexistente');
-        supplied.set(item.goalId,quantityForUnit(item.actualQuantity,goal.unit,'Cantidad realizada'));
+        supplied.set(item.goalId,quantityForUnit(item.actualQuantity,goal.unit,'Cantidad realizada',false,customQuantityConfig(goal.unit,goal.quantity_step,goal.quantity_decimals)));
       }
       if (supplied.size !== goals.length || goals.some((goal:any)=>!supplied.has(goal.id))) throw new BadRequestException('Informá todos los objetivos del día');
       const foreman = await one<any>(tx,'SELECT first_name,last_name FROM foremen WHERE administrator_id=$1 AND id=$2',[work.administrator_id,work.foreman_id]);
@@ -48,17 +48,17 @@ export class ReportsService {
         RETURNING id`,[reportId,work.administrator_id,work.id,date,work.foreman_id,`${foreman.first_name} ${foreman.last_name}`,observations]);
       const id = rows[0].id;
       for (const goal of goals) {
-        await tx.query(`INSERT INTO daily_report_items(id,administrator_id,work_id,report_id,work_date,goal_id,activity_id,description_snapshot,expected_quantity_snapshot,unit_snapshot,custom_unit_snapshot,actual_quantity)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        await tx.query(`INSERT INTO daily_report_items(id,administrator_id,work_id,report_id,work_date,goal_id,activity_id,description_snapshot,expected_quantity_snapshot,unit_snapshot,custom_unit_snapshot,actual_quantity,quantity_step_snapshot,quantity_decimals_snapshot)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
           ON CONFLICT (report_id,goal_id) DO UPDATE SET actual_quantity=EXCLUDED.actual_quantity,updated_at=now()`,
-          [uuid(),work.administrator_id,work.id,id,date,goal.id,goal.activity_id,goal.description,goal.expected_quantity,goal.unit,goal.custom_unit,supplied.get(goal.id)]);
+          [uuid(),work.administrator_id,work.id,id,date,goal.id,goal.activity_id,goal.description,goal.expected_quantity,goal.unit,goal.custom_unit,supplied.get(goal.id),goal.quantity_step,goal.quantity_decimals]);
       }
       return this.detail(id,work.administrator_id,tx);
     });
   }
   async detail(id: string, adminId: string, db: Db = this.db) {
     const report = await one<any>(db,`SELECT r.id,r.work_id AS "workId",r.work_date AS date,r.foreman_name_snapshot AS "foremanName",r.observations,r.submitted_at AS "submittedAt",r.updated_at AS "updatedAt",w.name AS "workName" FROM daily_reports r JOIN works w ON w.id=r.work_id WHERE r.id=$1 AND r.administrator_id=$2`,[id,adminId]);
-    const items = await db.query('SELECT id,goal_id AS "goalId",activity_id AS "activityId",description_snapshot AS description,expected_quantity_snapshot AS expected,actual_quantity AS actual,unit_snapshot AS unit,custom_unit_snapshot AS "customUnit" FROM daily_report_items WHERE report_id=$1 ORDER BY created_at,id',[id]);
+    const items = await db.query('SELECT id,goal_id AS "goalId",activity_id AS "activityId",description_snapshot AS description,expected_quantity_snapshot AS expected,actual_quantity AS actual,unit_snapshot AS unit,custom_unit_snapshot AS "customUnit",quantity_step_snapshot AS "quantityStep",quantity_decimals_snapshot AS "quantityDecimals" FROM daily_report_items WHERE report_id=$1 ORDER BY created_at,id',[id]);
     const photos = await db.query('SELECT id,mime_type AS "mimeType",width,height FROM report_photos WHERE report_id=$1 ORDER BY created_at',[id]);
     return { ...report,items,photos,compliance:reportSummary(items.map((i:any)=>({actual_quantity:i.actual,expected_quantity_snapshot:i.expected}))) };
   }
@@ -77,13 +77,13 @@ export class ReportsService {
       if (body.items !== undefined) {
         if (!Array.isArray(body.items)) throw new BadRequestException('Ítems inválidos');
         const ids = new Set<string>();
-        const units = new Map<string,string>((await tx.query('SELECT id,unit_snapshot FROM daily_report_items WHERE report_id=$1',[reportId])).map((row:any)=>[row.id,row.unit_snapshot]));
+        const units = new Map<string,{unit:string;step:number|null;decimals:number|null}>((await tx.query('SELECT id,unit_snapshot,quantity_step_snapshot,quantity_decimals_snapshot FROM daily_report_items WHERE report_id=$1',[reportId])).map((row:any)=>[row.id,{unit:row.unit_snapshot,step:row.quantity_step_snapshot,decimals:row.quantity_decimals_snapshot}]));
         for (const item of body.items) {
           if (!item || typeof item.id !== 'string' || ids.has(item.id)) throw new BadRequestException('Ítems duplicados o inválidos');
           ids.add(item.id);
           const unit = units.get(item.id);
           if (!unit) throw new BadRequestException('Ítem inexistente');
-          const rows = await tx.query('UPDATE daily_report_items SET actual_quantity=$3,updated_at=now() WHERE report_id=$1 AND id=$2 RETURNING id',[reportId,item.id,quantityForUnit(item.actualQuantity,unit,'Cantidad realizada')]);
+          const rows = await tx.query('UPDATE daily_report_items SET actual_quantity=$3,updated_at=now() WHERE report_id=$1 AND id=$2 RETURNING id',[reportId,item.id,quantityForUnit(item.actualQuantity,unit.unit,'Cantidad realizada',false,customQuantityConfig(unit.unit,unit.step,unit.decimals))]);
           if (!rows.length) throw new BadRequestException('Ítem inexistente');
         }
       }
