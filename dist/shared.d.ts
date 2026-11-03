@@ -20,7 +20,6 @@ export declare function validUnit(unit: unknown, custom: unknown): {
     unit: string;
     customUnit: string | null;
 };
-export declare function one<T = any>(db: Db, sql: string, params?: unknown[]): Promise<T>;
 export declare function localNow(timeZone: string, now?: Date): {
     date: string;
     time: string;

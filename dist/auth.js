@@ -10,10 +10,11 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 var __param = (this && this.__param) || function (paramIndex, decorator) {
     return function (target, key) { decorator(target, key, paramIndex); }
 };
-import { Body, Controller, Injectable, Post, Get, UseGuards, UnauthorizedException, Inject, Req } from '@nestjs/common';
+import { Body, Controller, Injectable, Post, Get, UseGuards, UnauthorizedException, Inject, Req, } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { compare } from 'bcryptjs';
 import { DB } from './database.module.js';
+import { Administrator } from './database/entities.js';
 let AuthService = class AuthService {
     db;
     jwt;
@@ -28,7 +29,9 @@ let AuthService = class AuthService {
         const key = ip;
         const now = Date.now();
         const entry = this.attempts.get(key);
-        const next = !entry || entry.until < now ? { count: 1, until: now + 15 * 60_000 } : { count: entry.count + 1, until: entry.until };
+        const next = !entry || entry.until < now
+            ? { count: 1, until: now + 15 * 60_000 }
+            : { count: entry.count + 1, until: entry.until };
         this.attempts.set(key, next);
         if (next.count > 10)
             throw new UnauthorizedException('Demasiados intentos. Volvé a intentar más tarde.');
@@ -36,12 +39,30 @@ let AuthService = class AuthService {
             for (const [item, value] of this.attempts)
                 if (value.until < now)
                     this.attempts.delete(item);
-        const rows = await this.db.query('SELECT id, email, full_name, password_hash FROM administrators WHERE lower(email) = lower($1) AND is_active = true', [email.trim()]);
-        const admin = rows[0];
-        if (!admin || !(await compare(password, admin.password_hash)))
+        const admin = await this.db
+            .getRepository(Administrator)
+            .createQueryBuilder('administrator')
+            .addSelect('administrator.passwordHash')
+            .where('LOWER(administrator.email) = LOWER(:email)', {
+            email: email.trim(),
+        })
+            .andWhere('administrator.isActive = :active', { active: true })
+            .getOne();
+        if (!admin || !(await compare(password, admin.passwordHash)))
             throw new UnauthorizedException('Credenciales incorrectas');
         this.attempts.delete(key);
-        return { accessToken: await this.jwt.signAsync({ sub: admin.id }), administrator: { id: admin.id, email: admin.email, fullName: admin.full_name } };
+        return {
+            accessToken: await this.jwt.signAsync({
+                type: 'administrator',
+                sub: admin.id,
+                administratorId: admin.id,
+            }),
+            administrator: {
+                id: admin.id,
+                email: admin.email,
+                fullName: admin.fullName,
+            },
+        };
     }
 };
 AuthService = __decorate([
@@ -64,8 +85,12 @@ let JwtGuard = class JwtGuard {
             throw new UnauthorizedException();
         try {
             const payload = await this.jwt.verifyAsync(header.slice(7));
-            const rows = await this.db.query('SELECT id FROM administrators WHERE id = $1 AND is_active = true', [payload.sub]);
-            if (!rows.length)
+            if (payload.type && payload.type !== 'administrator')
+                throw new Error('profile');
+            const active = await this.db
+                .getRepository(Administrator)
+                .existsBy({ id: payload.sub, isActive: true });
+            if (!active)
                 throw new Error('inactive');
             req.administratorId = payload.sub;
             return true;
@@ -88,10 +113,15 @@ let AuthController = class AuthController {
         this.auth = auth;
         this.db = db;
     }
-    login(body, req) { return this.auth.login(body.email, body.password, req.ip ?? 'unknown'); }
+    login(body, req) {
+        return this.auth.login(body.email, body.password, req.ip ?? 'unknown');
+    }
     async me(req) {
-        const [row] = await this.db.query('SELECT id, email, full_name AS "fullName" FROM administrators WHERE id = $1', [req.administratorId]);
-        return row;
+        const administrator = await this.db.getRepository(Administrator).findOne({
+            select: { id: true, email: true, fullName: true },
+            where: { id: req.administratorId },
+        });
+        return administrator ?? undefined;
     }
 };
 __decorate([

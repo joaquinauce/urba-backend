@@ -8,8 +8,20 @@ export class HealthController {
 
   @Get()
   async check() {
-    const [result] = await this.db.query(`SELECT current_database() AS database,
-      to_regclass('public.administrators') IS NOT NULL AS schema_ready`);
-    return { status: result.schema_ready ? 'ok' : 'schema_missing', database: result.database };
+    const result = await this.db
+      .createQueryBuilder()
+      .select('current_database()', 'database')
+      .addSelect(
+        `to_regclass('public.administrators') IS NOT NULL`,
+        'schema_ready',
+      )
+      .from('pg_catalog.pg_database', 'database_catalog')
+      .where('database_catalog.datname = current_database()')
+      .getRawOne<{ database: string; schema_ready: boolean }>();
+    if (!result) return { status: 'schema_missing', database: null };
+    return {
+      status: result.schema_ready ? 'ok' : 'schema_missing',
+      database: result.database,
+    };
   }
 }

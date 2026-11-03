@@ -4,6 +4,9 @@ export declare class HealthController {
     constructor(db: DataSource);
     check(): Promise<{
         status: string;
-        database: any;
+        database: null;
+    } | {
+        status: string;
+        database: string;
     }>;
 }

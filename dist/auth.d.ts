@@ -2,6 +2,7 @@ import { CanActivate, ExecutionContext } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import type { Request } from 'express';
 import type { DataSource } from 'typeorm';
+import { Administrator } from './database/entities.js';
 export type AdminRequest = Request & {
     administratorId: string;
 };
@@ -13,9 +14,9 @@ export declare class AuthService {
     login(email: string, password: string, ip: string): Promise<{
         accessToken: string;
         administrator: {
-            id: any;
-            email: any;
-            fullName: any;
+            id: string;
+            email: string;
+            fullName: string;
         };
     }>;
 }
@@ -35,10 +36,10 @@ export declare class AuthController {
     }, req: Request): Promise<{
         accessToken: string;
         administrator: {
-            id: any;
-            email: any;
-            fullName: any;
+            id: string;
+            email: string;
+            fullName: string;
         };
     }>;
-    me(req: AdminRequest): Promise<any>;
+    me(req: AdminRequest): Promise<Administrator | undefined>;
 }

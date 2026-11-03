@@ -20,7 +20,9 @@
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
-    "test:e2e": "vitest run --config ./vitest.config.e2e.ts"
+    "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
+    "test:integration:read": "RUN_PG_READ_INTEGRATION=true node --env-file=.env ./node_modules/vitest/vitest.mjs run --config ./vitest.config.e2e.ts src/postgres.e2e-spec.ts",
+    "test:integration:write": "node --env-file=.env scripts/run-write-integration.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",

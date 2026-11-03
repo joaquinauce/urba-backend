@@ -10,19 +10,27 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 var __param = (this && this.__param) || function (paramIndex, decorator) {
     return function (target, key) { decorator(target, key, paramIndex); }
 };
-import { BadRequestException, Body, ConflictException, Controller, Delete, Get, Inject, Injectable, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, ConflictException, Controller, Delete, Get, Inject, Injectable, NotFoundException, Param, Patch, Post, Query, Req, UseGuards, } from '@nestjs/common';
+import { In } from 'typeorm';
 import QRCode from 'qrcode';
 import { hash } from 'bcryptjs';
 import { DB } from './database.module.js';
 import { JwtGuard } from './auth.js';
-import { code, codeHash, customQuantityConfig, localNow, number, one, optional, percentage, quantityForUnit, reportSummary, required, uuid, validDate, validUnit } from './shared.js';
+import { Activity, DailyGoal, DailyReport, DailyReportItem, Foreman, GoalRecurrence, ReportCorrection, ReportPhoto, Work, } from './database/entities.js';
+import { code, codeHash, customQuantityConfig, localNow, number, optional, percentage, quantityForUnit, reportSummary, required, uuid, validDate, validUnit, } from './shared.js';
 export function normalizeAlias(value) {
     if (value === null || value === undefined || value === '')
         return null;
     if (typeof value !== 'string')
         throw new BadRequestException('Alias inválido');
-    const alias = value.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
-    if (!/^[A-Z0-9]+(?:-[A-Z0-9]+)*$/.test(alias) || alias.length < 4 || alias.length > 40)
+    const alias = value
+        .trim()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toUpperCase();
+    if (!/^[A-Z0-9]+(?:-[A-Z0-9]+)*$/.test(alias) ||
+        alias.length < 4 ||
+        alias.length > 40)
         throw new BadRequestException('El alias debe tener 4 a 40 letras, números o guiones');
     return alias;
 }
@@ -37,22 +45,98 @@ let AdminService = class AdminService {
         this.db = db;
     }
     async foremen(adminId) {
-        return this.db.query('SELECT id, first_name AS "firstName", last_name AS "lastName", phone, is_active AS "isActive" FROM foremen WHERE administrator_id = $1 ORDER BY first_name, last_name', [adminId]);
+        const foremen = await this.db.getRepository(Foreman).find({
+            select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                phone: true,
+                isActive: true,
+            },
+            where: { administratorId: adminId },
+            order: { firstName: 'ASC', lastName: 'ASC' },
+        });
+        return foremen.map(({ id, firstName, lastName, phone, isActive }) => ({
+            id,
+            firstName,
+            lastName,
+            phone,
+            isActive,
+        }));
     }
     async saveForeman(adminId, body, id) {
         const first = required(body.firstName, 'Nombre', 100);
         const last = required(body.lastName, 'Apellido', 100);
         const phone = required(body.phone, 'Teléfono', 40);
+        const repository = this.db.getRepository(Foreman);
         if (id) {
-            return one(this.db, 'UPDATE foremen SET first_name=$3,last_name=$4,phone=$5,is_active=$6,updated_at=now() WHERE administrator_id=$1 AND id=$2 RETURNING id,first_name AS "firstName",last_name AS "lastName",phone,is_active AS "isActive"', [adminId, id, first, last, phone, body.isActive !== false]);
+            const foreman = await repository.findOneBy({
+                id,
+                administratorId: adminId,
+            });
+            if (!foreman)
+                throw new NotFoundException('Recurso no encontrado');
+            Object.assign(foreman, {
+                firstName: first,
+                lastName: last,
+                phone,
+                isActive: body.isActive !== false,
+                updatedAt: new Date(),
+            });
+            const saved = await repository.save(foreman);
+            return {
+                id: saved.id,
+                firstName: saved.firstName,
+                lastName: saved.lastName,
+                phone: saved.phone,
+                isActive: saved.isActive,
+            };
         }
-        return one(this.db, 'INSERT INTO foremen(id,administrator_id,first_name,last_name,phone,is_active) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,first_name AS "firstName",last_name AS "lastName",phone,is_active AS "isActive"', [uuid(), adminId, first, last, phone, body.isActive !== false]);
+        const saved = await repository.save(repository.create({
+            id: uuid(),
+            administratorId: adminId,
+            firstName: first,
+            lastName: last,
+            phone,
+            isActive: body.isActive !== false,
+        }));
+        return {
+            id: saved.id,
+            firstName: saved.firstName,
+            lastName: saved.lastName,
+            phone: saved.phone,
+            isActive: saved.isActive,
+        };
     }
     async works(adminId) {
-        return this.db.query(`SELECT w.id,w.name,w.description,w.location,w.start_date AS "startDate",w.estimated_end_date AS "estimatedEndDate",w.status,w.time_zone AS "timeZone",w.close_time AS "closeTime",w.foreman_id AS "foremanId",w.access_alias AS "accessAlias",f.first_name||' '||f.last_name AS "foremanName" FROM works w JOIN foremen f ON f.id=w.foreman_id WHERE w.administrator_id=$1 ORDER BY CASE w.status WHEN 'ACTIVA' THEN 0 WHEN 'PAUSADA' THEN 1 ELSE 2 END,w.name`, [adminId]);
+        return this.db
+            .getRepository(Work)
+            .createQueryBuilder('work')
+            .innerJoin('work.primaryForeman', 'foreman')
+            .select('work.id', 'id')
+            .addSelect('work.name', 'name')
+            .addSelect('work.description', 'description')
+            .addSelect('work.location', 'location')
+            .addSelect('work.startDate', 'startDate')
+            .addSelect('work.estimatedEndDate', 'estimatedEndDate')
+            .addSelect('work.status', 'status')
+            .addSelect('work.timeZone', 'timeZone')
+            .addSelect('work.closeTime', 'closeTime')
+            .addSelect('work.foremanId', 'foremanId')
+            .addSelect('work.accessAlias', 'accessAlias')
+            .addSelect(`foreman.firstName || ' ' || foreman.lastName`, 'foremanName')
+            .where('work.administratorId = :adminId', { adminId })
+            .orderBy(`CASE work.status WHEN 'ACTIVA' THEN 0 WHEN 'PAUSADA' THEN 1 ELSE 2 END`, 'ASC')
+            .addOrderBy('work.name', 'ASC')
+            .getRawMany();
     }
     async work(adminId, id, db = this.db) {
-        return one(db, 'SELECT * FROM works WHERE administrator_id=$1 AND id=$2', [adminId, id]);
+        const work = await db
+            .getRepository(Work)
+            .findOneBy({ administratorId: adminId, id });
+        if (!work)
+            throw new NotFoundException('Recurso no encontrado');
+        return work;
     }
     async saveWork(adminId, body, id) {
         const name = required(body.name, 'Nombre de obra', 180);
@@ -62,8 +146,13 @@ let AdminService = class AdminService {
         const end = validDate(body.estimatedEndDate);
         if (end < start)
             throw new BadRequestException('La fecha final debe ser posterior al inicio');
-        const foreman = await one(this.db, 'SELECT id FROM foremen WHERE administrator_id=$1 AND id=$2 AND is_active=true', [adminId, body.foremanId]);
-        void foreman;
+        const foremanExists = await this.db.getRepository(Foreman).existsBy({
+            administratorId: adminId,
+            id: body.foremanId,
+            isActive: true,
+        });
+        if (!foremanExists)
+            throw new NotFoundException('Recurso no encontrado');
         const status = body.status ?? 'ACTIVA';
         if (!['ACTIVA', 'PAUSADA', 'FINALIZADA'].includes(status))
             throw new BadRequestException('Estado inválido');
@@ -73,16 +162,51 @@ let AdminService = class AdminService {
         if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(closeTime))
             throw new BadRequestException('Hora de cierre inválida');
         const alias = normalizeAlias(body.accessAlias);
+        const repository = this.db.getRepository(Work);
         if (id) {
-            const previous = await this.work(adminId, id);
-            const effectiveAlias = body.accessAlias === undefined ? previous.access_alias : alias;
+            const previous = await repository
+                .createQueryBuilder('work')
+                .addSelect('work.aliasPinHash')
+                .where('work.administratorId = :adminId AND work.id = :id', {
+                adminId,
+                id,
+            })
+                .getOne();
+            if (!previous)
+                throw new NotFoundException('Recurso no encontrado');
+            const effectiveAlias = body.accessAlias === undefined ? previous.accessAlias : alias;
             const pinChanged = body.aliasPin !== undefined && body.aliasPin !== '';
-            if (effectiveAlias && !pinChanged && !previous.alias_pin_hash)
+            if (effectiveAlias && !pinChanged && !previous.aliasPinHash)
                 throw new BadRequestException('Definí un PIN para habilitar el alias');
-            const pinHash = effectiveAlias ? pinChanged ? await hash(validPin(body.aliasPin), 12) : previous.alias_pin_hash : null;
-            const revoke = effectiveAlias !== previous.access_alias || pinChanged;
+            const pinHash = effectiveAlias
+                ? pinChanged
+                    ? await hash(validPin(body.aliasPin), 12)
+                    : previous.aliasPinHash
+                : null;
+            const revoke = effectiveAlias !== previous.accessAlias || pinChanged;
+            Object.assign(previous, {
+                foremanId: body.foremanId,
+                name,
+                description,
+                location,
+                startDate: start,
+                estimatedEndDate: end,
+                status,
+                timeZone,
+                closeTime,
+                accessAlias: effectiveAlias,
+                aliasPinHash: pinHash,
+                aliasSessionVersion: String(BigInt(previous.aliasSessionVersion) + BigInt(revoke ? 1 : 0)),
+                updatedAt: new Date(),
+            });
             try {
-                return await one(this.db, `UPDATE works SET foreman_id=$3,name=$4,description=$5,location=$6,start_date=$7,estimated_end_date=$8,status=$9,time_zone=$10,close_time=$11,access_alias=$12,alias_pin_hash=$13,alias_session_version=alias_session_version+$14,updated_at=now() WHERE administrator_id=$1 AND id=$2 RETURNING id,name,status,access_alias AS "accessAlias"`, [adminId, id, body.foremanId, name, description, location, start, end, status, timeZone, closeTime, effectiveAlias, pinHash, revoke ? 1 : 0]);
+                const saved = await repository.save(previous);
+                return {
+                    id: saved.id,
+                    name: saved.name,
+                    status: saved.status,
+                    accessAlias: saved.accessAlias,
+                };
             }
             catch (error) {
                 if (error.code === '23505')
@@ -96,7 +220,22 @@ let AdminService = class AdminService {
         const accessCode = code();
         const workId = uuid();
         try {
-            await this.db.query(`INSERT INTO works(id,administrator_id,foreman_id,name,description,location,start_date,estimated_end_date,status,time_zone,close_time,access_code_hash,access_alias,alias_pin_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, [workId, adminId, body.foremanId, name, description, location, start, end, status, timeZone, closeTime, codeHash(accessCode), alias, pinHash]);
+            await repository.save(repository.create({
+                id: workId,
+                administratorId: adminId,
+                foremanId: body.foremanId,
+                name,
+                description,
+                location,
+                startDate: start,
+                estimatedEndDate: end,
+                status,
+                timeZone,
+                closeTime,
+                accessCodeHash: codeHash(accessCode),
+                accessAlias: alias,
+                aliasPinHash: pinHash,
+            }));
         }
         catch (error) {
             if (error.code === '23505')
@@ -107,51 +246,189 @@ let AdminService = class AdminService {
     }
     async accessResult(id, name, accessCode) {
         const url = `${(process.env.PUBLIC_APP_URL ?? 'http://localhost:4200').replace(/\/$/, '')}/obra/${accessCode}`;
-        return { id, name, accessCode, url, qrDataUrl: await QRCode.toDataURL(url) };
+        return {
+            id,
+            name,
+            accessCode,
+            url,
+            qrDataUrl: await QRCode.toDataURL(url),
+        };
     }
     async rotateCode(adminId, id) {
         const work = await this.work(adminId, id);
         const accessCode = code();
-        await this.db.query('UPDATE works SET access_code_hash=$3,access_code_rotated_at=now(),updated_at=now() WHERE administrator_id=$1 AND id=$2', [adminId, id, codeHash(accessCode)]);
+        await this.db.getRepository(Work).update({ administratorId: adminId, id }, {
+            accessCodeHash: codeHash(accessCode),
+            accessCodeRotatedAt: new Date(),
+            updatedAt: new Date(),
+        });
         return this.accessResult(id, work.name, accessCode);
+    }
+    async lockWork(db, adminId, workId) {
+        const work = await db
+            .getRepository(Work)
+            .createQueryBuilder('work')
+            .where('work.administratorId = :adminId AND work.id = :workId', {
+            adminId,
+            workId,
+        })
+            .setLock('pessimistic_write')
+            .getOne();
+        if (!work)
+            throw new NotFoundException('Recurso no encontrado');
+        return work;
     }
     async materialize(adminId, workId, date, db = this.db) {
         validDate(date);
         if (db === this.db)
             return this.db.transaction(async (tx) => {
-                await tx.query('SELECT id FROM works WHERE administrator_id=$1 AND id=$2 FOR UPDATE', [adminId, workId]);
+                await this.lockWork(tx, adminId, workId);
                 return this.materialize(adminId, workId, date, tx);
             });
+        const reported = await db
+            .getRepository(DailyReport)
+            .existsBy({ workId, workDate: date });
+        if (reported)
+            return;
         const weekday = new Date(`${date}T12:00:00Z`).getUTCDay();
         const bit = 1 << ((weekday + 6) % 7);
-        await db.query(`INSERT INTO daily_goals(id,administrator_id,work_id,activity_id,recurrence_id,work_date,description,expected_quantity,unit,custom_unit,quantity_step,quantity_decimals)
-      SELECT gen_random_uuid(),r.administrator_id,r.work_id,r.activity_id,r.id,$3,r.description,r.expected_quantity,a.unit,a.custom_unit,a.quantity_step,a.quantity_decimals
-      FROM goal_recurrences r JOIN activities a ON a.id=r.activity_id
-      WHERE r.administrator_id=$1 AND r.work_id=$2 AND r.is_active=true AND $3::date BETWEEN r.starts_on AND r.ends_on AND (r.days_mask & $4)<>0
-        AND NOT EXISTS (SELECT 1 FROM daily_reports reported WHERE reported.work_id=r.work_id AND reported.work_date=$3::date)
-      ON CONFLICT (recurrence_id,work_date) WHERE recurrence_id IS NOT NULL DO NOTHING`, [adminId, workId, date, bit]);
+        const recurrences = await db
+            .getRepository(GoalRecurrence)
+            .createQueryBuilder('recurrence')
+            .innerJoinAndSelect('recurrence.activity', 'activity')
+            .where('recurrence.administratorId = :adminId', { adminId })
+            .andWhere('recurrence.workId = :workId', { workId })
+            .andWhere('recurrence.isActive = :active', { active: true })
+            .andWhere(':date BETWEEN recurrence.startsOn AND recurrence.endsOn', {
+            date,
+        })
+            .andWhere('(recurrence.daysMask & :bit) <> 0', { bit })
+            .getMany();
+        if (!recurrences.length)
+            return;
+        const existing = new Set((await db.getRepository(DailyGoal).find({
+            select: { recurrenceId: true },
+            where: { workId, workDate: date },
+        })).map((goal) => goal.recurrenceId));
+        const goals = recurrences
+            .filter((recurrence) => !existing.has(recurrence.id))
+            .map((recurrence) => db.getRepository(DailyGoal).create({
+            id: uuid(),
+            administratorId: recurrence.administratorId,
+            workId: recurrence.workId,
+            activityId: recurrence.activityId,
+            recurrenceId: recurrence.id,
+            workDate: date,
+            description: recurrence.description,
+            expectedQuantity: recurrence.expectedQuantity,
+            unit: recurrence.activity.unit,
+            customUnit: recurrence.activity.customUnit,
+            quantityStep: recurrence.activity.quantityStep,
+            quantityDecimals: recurrence.activity.quantityDecimals,
+        }));
+        if (goals.length)
+            await db.getRepository(DailyGoal).insert(goals);
     }
     async materializeAll(adminId, workId) {
+        await this.materializeAllMany(adminId, [workId]);
+    }
+    async materializeAllMany(adminId, workIds) {
+        if (!workIds.length)
+            return;
         await this.db.transaction(async (tx) => {
-            await tx.query('SELECT id FROM works WHERE administrator_id=$1 AND id=$2 FOR UPDATE', [adminId, workId]);
-            await tx.query(`INSERT INTO daily_goals(id,administrator_id,work_id,activity_id,recurrence_id,work_date,description,expected_quantity,unit,custom_unit,quantity_step,quantity_decimals)
-      SELECT gen_random_uuid(),r.administrator_id,r.work_id,r.activity_id,r.id,days.day::date,r.description,r.expected_quantity,a.unit,a.custom_unit,a.quantity_step,a.quantity_decimals
-      FROM goal_recurrences r JOIN activities a ON a.id=r.activity_id
-      CROSS JOIN LATERAL generate_series(r.starts_on,r.ends_on,interval '1 day') AS days(day)
-      WHERE r.administrator_id=$1 AND r.work_id=$2 AND r.is_active=true
-        AND (r.days_mask & (1 << (extract(isodow from days.day)::int-1)))<>0
-        AND NOT EXISTS (SELECT 1 FROM daily_reports reported WHERE reported.work_id=r.work_id AND reported.work_date=days.day::date)
-      ON CONFLICT (recurrence_id,work_date) WHERE recurrence_id IS NOT NULL DO NOTHING`, [adminId, workId]);
+            const locked = await tx
+                .getRepository(Work)
+                .createQueryBuilder('work')
+                .where('work.administratorId = :adminId', { adminId })
+                .andWhere('work.id IN (:...workIds)', { workIds })
+                .setLock('pessimistic_write')
+                .getMany();
+            if (locked.length !== workIds.length)
+                throw new NotFoundException('Recurso no encontrado');
+            const recurrences = await tx.getRepository(GoalRecurrence).find({
+                where: {
+                    administratorId: adminId,
+                    workId: In(workIds),
+                    isActive: true,
+                },
+                relations: { activity: true },
+            });
+            if (!recurrences.length)
+                return;
+            const reports = new Set((await tx.getRepository(DailyReport).find({
+                select: { workId: true, workDate: true },
+                where: { workId: In(workIds) },
+            })).map((report) => `${report.workId}:${report.workDate}`));
+            const existing = new Set((await tx.getRepository(DailyGoal).find({
+                select: { recurrenceId: true, workDate: true },
+                where: { workId: In(workIds) },
+            })).map((goal) => `${goal.recurrenceId}:${goal.workDate}`));
+            const goals = [];
+            for (const recurrence of recurrences) {
+                for (let cursor = new Date(`${recurrence.startsOn}T12:00:00Z`); cursor <= new Date(`${recurrence.endsOn}T12:00:00Z`); cursor.setUTCDate(cursor.getUTCDate() + 1)) {
+                    const date = cursor.toISOString().slice(0, 10);
+                    const bit = 1 << ((cursor.getUTCDay() + 6) % 7);
+                    if ((recurrence.daysMask & bit) === 0 ||
+                        reports.has(`${recurrence.workId}:${date}`) ||
+                        existing.has(`${recurrence.id}:${date}`))
+                        continue;
+                    goals.push(tx.getRepository(DailyGoal).create({
+                        id: uuid(),
+                        administratorId: adminId,
+                        workId: recurrence.workId,
+                        activityId: recurrence.activityId,
+                        recurrenceId: recurrence.id,
+                        workDate: date,
+                        description: recurrence.description,
+                        expectedQuantity: recurrence.expectedQuantity,
+                        unit: recurrence.activity.unit,
+                        customUnit: recurrence.activity.customUnit,
+                        quantityStep: recurrence.activity.quantityStep,
+                        quantityDecimals: recurrence.activity.quantityDecimals,
+                    }));
+                }
+            }
+            if (goals.length)
+                await tx.getRepository(DailyGoal).insert(goals);
         });
     }
     async goals(adminId, workId, date) {
         await this.work(adminId, workId);
         await this.materialize(adminId, workId, date);
-        return this.db.query('SELECT id,activity_id AS "activityId",recurrence_id AS "recurrenceId",work_date AS date,description,expected_quantity AS "expectedQuantity",unit,custom_unit AS "customUnit",quantity_step AS "quantityStep",quantity_decimals AS "quantityDecimals",is_active AS "isActive" FROM daily_goals WHERE administrator_id=$1 AND work_id=$2 AND work_date=$3 ORDER BY created_at,id', [adminId, workId, date]);
+        const goals = await this.db.getRepository(DailyGoal).find({
+            where: { administratorId: adminId, workId, workDate: date },
+            order: { createdAt: 'ASC', id: 'ASC' },
+        });
+        return goals.map((goal) => ({
+            id: goal.id,
+            activityId: goal.activityId,
+            recurrenceId: goal.recurrenceId,
+            date: goal.workDate,
+            description: goal.description,
+            expectedQuantity: goal.expectedQuantity,
+            unit: goal.unit,
+            customUnit: goal.customUnit,
+            quantityStep: goal.quantityStep,
+            quantityDecimals: goal.quantityDecimals,
+            isActive: goal.isActive,
+        }));
     }
     async recurrences(adminId, workId) {
         await this.work(adminId, workId);
-        return this.db.query('SELECT id,activity_id AS "activityId",description,expected_quantity AS "expectedQuantity",starts_on AS "startsOn",ends_on AS "endsOn",days_mask AS "daysMask",is_active AS "isActive" FROM goal_recurrences WHERE administrator_id=$1 AND work_id=$2 ORDER BY created_at DESC', [adminId, workId]);
+        const recurrences = await this.db.getRepository(GoalRecurrence).find({
+            where: { administratorId: adminId, workId },
+            order: { createdAt: 'DESC' },
+        });
+        return recurrences.map((item) => ({
+            id: item.id,
+            activityId: item.activityId,
+            description: item.description,
+            expectedQuantity: item.expectedQuantity,
+            startsOn: item.startsOn,
+            endsOn: item.endsOn,
+            daysMask: item.daysMask,
+            isActive: item.isActive,
+        }));
     }
     async createGoal(adminId, workId, body) {
         await this.work(adminId, workId);
@@ -159,64 +436,142 @@ let AdminService = class AdminService {
         const { unit, customUnit } = validUnit(body.unit, body.customUnit);
         let config = customQuantityConfig(unit, body.quantityStep, body.quantityDecimals);
         return this.db.transaction(async (tx) => {
-            await tx.query('SELECT id FROM works WHERE administrator_id=$1 AND id=$2 FOR UPDATE', [adminId, workId]);
+            await this.lockWork(tx, adminId, workId);
             let activityId = body.activityId;
             if (activityId) {
-                const activity = await one(tx, 'SELECT id,unit,custom_unit,quantity_step,quantity_decimals FROM activities WHERE administrator_id=$1 AND work_id=$2 AND id=$3 AND is_active=true', [adminId, workId, activityId]);
-                if (activity.unit !== unit || activity.custom_unit !== customUnit)
+                const activity = await tx.getRepository(Activity).findOneBy({
+                    administratorId: adminId,
+                    workId,
+                    id: activityId,
+                    isActive: true,
+                });
+                if (!activity)
+                    throw new NotFoundException('Recurso no encontrado');
+                if (activity.unit !== unit || activity.customUnit !== customUnit)
                     throw new BadRequestException('La unidad de la actividad debe mantenerse');
-                const existing = customQuantityConfig(unit, activity.quantity_step, activity.quantity_decimals);
-                if (config && (config.step !== (existing?.step ?? 0.001) || config.decimals !== (existing?.decimals ?? 3)))
+                const existing = customQuantityConfig(unit, activity.quantityStep, activity.quantityDecimals);
+                if (config &&
+                    (config.step !== (existing?.step ?? 0.001) ||
+                        config.decimals !== (existing?.decimals ?? 3)))
                     throw new BadRequestException('El paso y decimales deben coincidir con la actividad');
                 config = existing;
             }
             else {
                 activityId = uuid();
-                await tx.query('INSERT INTO activities(id,administrator_id,work_id,name,unit,custom_unit,quantity_step,quantity_decimals) VALUES($1,$2,$3,$4,$5,$6,$7,$8)', [activityId, adminId, workId, description, unit, customUnit, config?.step ?? null, config?.decimals ?? null]);
+                await tx.getRepository(Activity).insert({
+                    id: activityId,
+                    administratorId: adminId,
+                    workId,
+                    name: description,
+                    unit,
+                    customUnit,
+                    quantityStep: config ? String(config.step) : null,
+                    quantityDecimals: config?.decimals ?? null,
+                });
             }
             const expected = quantityForUnit(body.expectedQuantity, unit, 'Meta', true, config);
             if (body.recurrence) {
                 const { startsOn, endsOn, daysMask } = body.recurrence;
                 validDate(startsOn);
                 validDate(endsOn);
-                if (endsOn < startsOn || (Date.parse(endsOn) - Date.parse(startsOn)) / 86400000 > 730)
+                if (endsOn < startsOn ||
+                    (Date.parse(endsOn) - Date.parse(startsOn)) / 86400000 > 730)
                     throw new BadRequestException('Rango de recurrencia inválido (máximo dos años)');
                 if (!Number.isInteger(daysMask) || daysMask < 1 || daysMask > 127)
                     throw new BadRequestException('Días de recurrencia inválidos');
                 const id = uuid();
-                await tx.query('INSERT INTO goal_recurrences(id,administrator_id,work_id,activity_id,description,expected_quantity,starts_on,ends_on,days_mask) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)', [id, adminId, workId, activityId, description, expected, startsOn, endsOn, daysMask]);
+                await tx.getRepository(GoalRecurrence).insert({
+                    id,
+                    administratorId: adminId,
+                    workId,
+                    activityId,
+                    description,
+                    expectedQuantity: String(expected),
+                    startsOn,
+                    endsOn,
+                    daysMask,
+                });
                 return { id, activityId, recurrence: true };
             }
             const date = validDate(body.date);
-            const reported = await tx.query('SELECT 1 FROM daily_reports WHERE administrator_id=$1 AND work_id=$2 AND work_date=$3', [adminId, workId, date]);
-            if (reported.length)
+            const reported = await tx
+                .getRepository(DailyReport)
+                .existsBy({ administratorId: adminId, workId, workDate: date });
+            if (reported)
                 throw new BadRequestException('No se pueden agregar objetivos a un día informado');
             const id = uuid();
-            await tx.query('INSERT INTO daily_goals(id,administrator_id,work_id,activity_id,work_date,description,expected_quantity,unit,custom_unit,quantity_step,quantity_decimals) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [id, adminId, workId, activityId, date, description, expected, unit, customUnit, config?.step ?? null, config?.decimals ?? null]);
+            await tx.getRepository(DailyGoal).insert({
+                id,
+                administratorId: adminId,
+                workId,
+                activityId,
+                workDate: date,
+                description,
+                expectedQuantity: String(expected),
+                unit,
+                customUnit,
+                quantityStep: config ? String(config.step) : null,
+                quantityDecimals: config?.decimals ?? null,
+            });
             return { id, activityId, recurrence: false };
         });
     }
     async updateGoal(adminId, workId, goalId, body) {
         return this.db.transaction(async (tx) => {
-            await tx.query('SELECT id FROM works WHERE administrator_id=$1 AND id=$2 FOR UPDATE', [adminId, workId]);
-            const goal = await one(tx, 'SELECT * FROM daily_goals WHERE administrator_id=$1 AND work_id=$2 AND id=$3 FOR UPDATE', [adminId, workId, goalId]);
-            const reported = await tx.query('SELECT 1 FROM daily_reports WHERE work_id=$1 AND work_date=$2', [workId, goal.work_date]);
-            if (reported.length)
+            await this.lockWork(tx, adminId, workId);
+            const goal = await tx
+                .getRepository(DailyGoal)
+                .createQueryBuilder('goal')
+                .where('goal.administratorId = :adminId AND goal.workId = :workId AND goal.id = :goalId', { adminId, workId, goalId })
+                .setLock('pessimistic_write')
+                .getOne();
+            if (!goal)
+                throw new NotFoundException('Recurso no encontrado');
+            const reported = await tx
+                .getRepository(DailyReport)
+                .existsBy({ workId, workDate: goal.workDate });
+            if (reported)
                 throw new BadRequestException('El objetivo ya fue informado');
             const description = required(body.description ?? goal.description, 'Descripción');
-            const config = customQuantityConfig(goal.unit, goal.quantity_step, goal.quantity_decimals);
-            const expected = quantityForUnit(body.expectedQuantity ?? goal.expected_quantity, goal.unit, 'Meta', true, config);
-            return one(tx, 'UPDATE daily_goals SET description=$4,expected_quantity=$5,is_active=$6,updated_at=now() WHERE administrator_id=$1 AND work_id=$2 AND id=$3 RETURNING id,description,expected_quantity AS "expectedQuantity",is_active AS "isActive"', [adminId, workId, goalId, description, expected, body.isActive ?? goal.is_active]);
+            const config = customQuantityConfig(goal.unit, goal.quantityStep, goal.quantityDecimals);
+            const expected = quantityForUnit(body.expectedQuantity ?? goal.expectedQuantity, goal.unit, 'Meta', true, config);
+            Object.assign(goal, {
+                description,
+                expectedQuantity: String(expected),
+                isActive: body.isActive ?? goal.isActive,
+                updatedAt: new Date(),
+            });
+            const saved = await tx.getRepository(DailyGoal).save(goal);
+            return {
+                id: saved.id,
+                description: saved.description,
+                expectedQuantity: saved.expectedQuantity,
+                isActive: saved.isActive,
+            };
         });
     }
     async deactivateRecurrence(adminId, workId, id) {
         const work = await this.work(adminId, workId);
-        const today = localNow(work.time_zone).date;
+        const today = localNow(work.timeZone).date;
         return this.db.transaction(async (tx) => {
-            await tx.query('SELECT id FROM works WHERE administrator_id=$1 AND id=$2 FOR UPDATE', [adminId, workId]);
-            const result = await one(tx, 'UPDATE goal_recurrences SET is_active=false,updated_at=now() WHERE administrator_id=$1 AND work_id=$2 AND id=$3 RETURNING id,is_active AS "isActive"', [adminId, workId, id]);
-            await tx.query(`UPDATE daily_goals g SET is_active=false,updated_at=now() WHERE g.administrator_id=$1 AND g.work_id=$2 AND g.recurrence_id=$3 AND g.work_date>=$4 AND NOT EXISTS(SELECT 1 FROM daily_reports r WHERE r.work_id=g.work_id AND r.work_date=g.work_date)`, [adminId, workId, id, today]);
-            return result;
+            await this.lockWork(tx, adminId, workId);
+            const recurrence = await tx
+                .getRepository(GoalRecurrence)
+                .findOneBy({ administratorId: adminId, workId, id });
+            if (!recurrence)
+                throw new NotFoundException('Recurso no encontrado');
+            recurrence.isActive = false;
+            recurrence.updatedAt = new Date();
+            await tx.getRepository(GoalRecurrence).save(recurrence);
+            await tx
+                .getRepository(DailyGoal)
+                .createQueryBuilder()
+                .update(DailyGoal)
+                .set({ isActive: false, updatedAt: new Date() })
+                .where('administrator_id = :adminId AND work_id = :workId AND recurrence_id = :id AND work_date >= :today', { adminId, workId, id, today })
+                .andWhere(`NOT EXISTS (${tx.getRepository(DailyReport).createQueryBuilder('report').select('1').where('report.work_id = daily_goals.work_id').andWhere('report.work_date = daily_goals.work_date').getQuery()})`)
+                .execute();
+            return { id: recurrence.id, isActive: recurrence.isActive };
         });
     }
     async copyGoals(adminId, workId, date) {
@@ -226,68 +581,301 @@ let AdminService = class AdminService {
         const prev = previous.toISOString().slice(0, 10);
         await this.materialize(adminId, workId, prev);
         return this.db.transaction(async (tx) => {
-            await tx.query('SELECT id FROM works WHERE administrator_id=$1 AND id=$2 FOR UPDATE', [adminId, workId]);
-            const reported = await tx.query('SELECT 1 FROM daily_reports WHERE work_id=$1 AND work_date=$2', [workId, date]);
-            if (reported.length)
+            await this.lockWork(tx, adminId, workId);
+            const reported = await tx
+                .getRepository(DailyReport)
+                .existsBy({ workId, workDate: date });
+            if (reported)
                 throw new BadRequestException('El día ya fue informado');
-            const result = await tx.query(`INSERT INTO daily_goals(id,administrator_id,work_id,activity_id,work_date,description,expected_quantity,unit,custom_unit,quantity_step,quantity_decimals)
-        SELECT gen_random_uuid(),administrator_id,work_id,activity_id,$3,description,expected_quantity,unit,custom_unit,quantity_step,quantity_decimals FROM daily_goals
-        WHERE administrator_id=$1 AND work_id=$2 AND work_date=$4 AND is_active=true
-        AND NOT EXISTS (SELECT 1 FROM daily_goals target WHERE target.work_id=$2 AND target.work_date=$3 AND target.activity_id=daily_goals.activity_id AND target.description=daily_goals.description)
-        RETURNING id`, [adminId, workId, date, prev]);
-            return { copied: result.length };
+            const source = await tx.getRepository(DailyGoal).findBy({
+                administratorId: adminId,
+                workId,
+                workDate: prev,
+                isActive: true,
+            });
+            const target = await tx.getRepository(DailyGoal).find({
+                select: { activityId: true, description: true },
+                where: { workId, workDate: date },
+            });
+            const existing = new Set(target.map((goal) => `${goal.activityId}:${goal.description}`));
+            const copies = source
+                .filter((goal) => !existing.has(`${goal.activityId}:${goal.description}`))
+                .map((goal) => tx.getRepository(DailyGoal).create({
+                id: uuid(),
+                administratorId: goal.administratorId,
+                workId: goal.workId,
+                activityId: goal.activityId,
+                workDate: date,
+                description: goal.description,
+                expectedQuantity: goal.expectedQuantity,
+                unit: goal.unit,
+                customUnit: goal.customUnit,
+                quantityStep: goal.quantityStep,
+                quantityDecimals: goal.quantityDecimals,
+            }));
+            if (copies.length)
+                await tx.getRepository(DailyGoal).insert(copies);
+            return { copied: copies.length };
         });
     }
     async dashboard(adminId) {
-        const works = await this.db.query(`SELECT w.*,f.first_name||' '||f.last_name AS foreman_name FROM works w JOIN foremen f ON f.id=w.foreman_id WHERE w.administrator_id=$1 AND w.status='ACTIVA'`, [adminId]);
+        const works = await this.db.getRepository(Work).find({
+            where: { administratorId: adminId, status: 'ACTIVA' },
+            relations: { primaryForeman: true },
+        });
+        const workIds = works.map((work) => work.id);
+        if (!workIds.length)
+            return [];
+        await this.materializeAllMany(adminId, workIds);
+        const [allGoals, allReports, allItems] = await Promise.all([
+            this.db.getRepository(DailyGoal).find({
+                where: {
+                    administratorId: adminId,
+                    workId: In(workIds),
+                    isActive: true,
+                },
+            }),
+            this.db.getRepository(DailyReport).find({
+                where: { administratorId: adminId, workId: In(workIds) },
+                order: { workDate: 'DESC' },
+            }),
+            this.db.getRepository(DailyReportItem).find({
+                where: { administratorId: adminId, workId: In(workIds) },
+            }),
+        ]);
+        const itemsByReport = new Map();
+        for (const item of allItems) {
+            const items = itemsByReport.get(item.reportId) ?? [];
+            items.push(item);
+            itemsByReport.set(item.reportId, items);
+        }
         const result = [];
         for (const work of works) {
-            const { date, time } = localNow(work.time_zone);
-            await this.materializeAll(adminId, work.id);
-            const goals = await this.db.query('SELECT id FROM daily_goals WHERE work_id=$1 AND work_date=$2 AND is_active=true', [work.id, date]);
-            const reports = await this.db.query('SELECT id,work_date FROM daily_reports WHERE work_id=$1 ORDER BY work_date DESC LIMIT 7', [work.id]);
-            const today = reports.find((r) => r.work_date === date);
+            const { date, time } = localNow(work.timeZone);
+            const workGoals = allGoals.filter((goal) => goal.workId === work.id);
+            const goals = workGoals.filter((goal) => goal.workDate === date);
+            const reports = allReports
+                .filter((report) => report.workId === work.id)
+                .slice(0, 7);
+            const today = reports.find((report) => report.workDate === date);
             let compliance = null;
             const averages = [];
             for (const report of reports) {
-                const items = await this.db.query('SELECT actual_quantity,expected_quantity_snapshot FROM daily_report_items WHERE report_id=$1', [report.id]);
-                const score = reportSummary(items);
+                const score = reportSummary((itemsByReport.get(report.id) ?? []).map((item) => ({
+                    actual_quantity: item.actualQuantity,
+                    expected_quantity_snapshot: item.expectedQuantitySnapshot,
+                })));
                 if (score !== null)
                     averages.push(score);
                 if (report.id === today?.id)
                     compliance = score;
             }
-            const status = goals.length === 0 ? 'SIN_OBJETIVOS' : today ? (compliance === null ? 'SIN_OBJETIVOS' : compliance >= 100 ? 'VERDE' : compliance >= 70 ? 'AMARILLO' : 'ROJO') : time >= work.close_time.slice(0, 5) ? 'NEGRO' : 'GRIS';
-            const daysRemaining = Math.ceil((Date.parse(`${work.estimated_end_date}T12:00:00Z`) - Date.parse(`${date}T12:00:00Z`)) / 86400000);
-            const deviationRows = await this.db.query(`SELECT g.activity_id,SUM(g.expected_quantity)::numeric AS planned,COALESCE(SUM(i.actual_quantity),0)::numeric AS executed
-        FROM daily_goals g LEFT JOIN daily_report_items i ON i.goal_id=g.id
-        WHERE g.work_id=$1 AND g.work_date<=$2 AND g.is_active=true GROUP BY g.activity_id`, [work.id, date]);
-            const deviations = deviationRows.map((row) => ({ activityId: row.activity_id, planned: number(row.planned), executed: number(row.executed), difference: number(row.executed) - number(row.planned) }));
-            result.push({ id: work.id, name: work.name, foremanName: work.foreman_name, today: date, timeZone: work.time_zone, estimatedEndDate: work.estimated_end_date, daysRemaining, compliance, average7: averages.length ? Math.round(averages.reduce((a, b) => a + b, 0) / averages.length) : null, reportStatus: status, hasReport: !!today, deviations });
+            const status = goals.length === 0
+                ? 'SIN_OBJETIVOS'
+                : today
+                    ? compliance === null
+                        ? 'SIN_OBJETIVOS'
+                        : compliance >= 100
+                            ? 'VERDE'
+                            : compliance >= 70
+                                ? 'AMARILLO'
+                                : 'ROJO'
+                    : time >= work.closeTime.slice(0, 5)
+                        ? 'NEGRO'
+                        : 'GRIS';
+            const daysRemaining = Math.ceil((Date.parse(`${work.estimatedEndDate}T12:00:00Z`) -
+                Date.parse(`${date}T12:00:00Z`)) /
+                86400000);
+            const deviationActivities = new Set(workGoals
+                .filter((goal) => goal.workDate <= date)
+                .map((goal) => goal.activityId));
+            const deviations = [...deviationActivities].map((activityId) => {
+                const relevant = workGoals.filter((goal) => goal.activityId === activityId && goal.workDate <= date);
+                const goalIds = new Set(relevant.map((goal) => goal.id));
+                const planned = relevant.reduce((sum, goal) => sum + number(goal.expectedQuantity), 0);
+                const executed = allItems
+                    .filter((item) => item.workId === work.id && goalIds.has(item.goalId))
+                    .reduce((sum, item) => sum + number(item.actualQuantity), 0);
+                return {
+                    activityId,
+                    planned,
+                    executed,
+                    difference: executed - planned,
+                };
+            });
+            result.push({
+                id: work.id,
+                name: work.name,
+                foremanName: `${work.primaryForeman.firstName} ${work.primaryForeman.lastName}`,
+                today: date,
+                timeZone: work.timeZone,
+                estimatedEndDate: work.estimatedEndDate,
+                daysRemaining,
+                compliance,
+                average7: averages.length
+                    ? Math.round(averages.reduce((a, b) => a + b, 0) / averages.length)
+                    : null,
+                reportStatus: status,
+                hasReport: !!today,
+                deviations,
+            });
         }
-        const order = { NEGRO: 0, ROJO: 1, AMARILLO: 2, GRIS: 3, SIN_OBJETIVOS: 4, VERDE: 5 };
-        return result.sort((a, b) => order[a.reportStatus] - order[b.reportStatus] || a.name.localeCompare(b.name));
+        const order = {
+            NEGRO: 0,
+            ROJO: 1,
+            AMARILLO: 2,
+            GRIS: 3,
+            SIN_OBJETIVOS: 4,
+            VERDE: 5,
+        };
+        return result.sort((a, b) => order[a.reportStatus] - order[b.reportStatus] ||
+            a.name.localeCompare(b.name));
     }
-    async workDetail(adminId, workId) {
+    async workDetail(adminId, workId, materializeRecurrences = true) {
         const work = await this.work(adminId, workId);
-        const { date: today, time: todayTime } = localNow(work.time_zone);
-        await this.materializeAll(adminId, workId);
-        const goals = await this.db.query('SELECT id,activity_id AS "activityId",work_date AS date,description,expected_quantity AS "expectedQuantity",unit,quantity_step AS "quantityStep",quantity_decimals AS "quantityDecimals" FROM daily_goals WHERE administrator_id=$1 AND work_id=$2 AND is_active=true ORDER BY work_date DESC', [adminId, workId]);
-        const reports = await this.db.query('SELECT id,work_date AS date,foreman_name_snapshot AS "foremanName",observations,submitted_at AS "submittedAt",updated_at AS "updatedAt" FROM daily_reports WHERE administrator_id=$1 AND work_id=$2 ORDER BY work_date DESC', [adminId, workId]);
-        const activities = await this.db.query('SELECT id,name,unit,custom_unit AS "customUnit",quantity_step AS "quantityStep",quantity_decimals AS "quantityDecimals" FROM activities WHERE administrator_id=$1 AND work_id=$2', [adminId, workId]);
-        const items = await this.db.query(`SELECT i.report_id AS "reportId",i.activity_id AS "activityId",i.goal_id AS "goalId",i.description_snapshot AS description,i.expected_quantity_snapshot AS expected,i.actual_quantity AS actual,i.unit_snapshot AS unit,r.work_date AS date FROM daily_report_items i JOIN daily_reports r ON r.id=i.report_id WHERE i.administrator_id=$1 AND i.work_id=$2 ORDER BY r.work_date DESC`, [adminId, workId]);
-        const photos = await this.db.query('SELECT p.id,p.report_id AS "reportId" FROM report_photos p WHERE p.administrator_id=$1 AND p.work_id=$2', [adminId, workId]);
-        const corrections = await this.db.query('SELECT id,report_id AS "reportId",before_value AS before,after_value AS after,reason,created_at AS "createdAt" FROM report_corrections WHERE administrator_id=$1 AND work_id=$2 ORDER BY created_at DESC', [adminId, workId]);
-        const progress = activities.map((activity) => {
-            const planned = goals.filter((g) => g.activityId === activity.id && g.date <= today).reduce((s, g) => s + number(g.expectedQuantity), 0);
-            const executed = items.filter((i) => i.activityId === activity.id && i.date <= today).reduce((s, i) => s + number(i.actual), 0);
-            const reportedDays = new Set(items.filter((i) => i.activityId === activity.id && i.date <= today).map((i) => i.date)).size;
-            const remaining = goals.filter((g) => g.activityId === activity.id && g.date > today).reduce((s, g) => s + number(g.expectedQuantity), 0);
-            const rate = reportedDays >= 2 ? executed / reportedDays : null;
-            const projectedDays = rate && rate > 0 ? Math.ceil(Math.max(0, planned + remaining - executed) / rate) : null;
-            return { activityId: activity.id, name: activity.name, unit: activity.unit, planned, executed, difference: executed - planned, compliance: planned > 0 ? Math.round(percentage(executed, planned)) : null, projectedDays, risk: projectedDays !== null && projectedDays > Math.ceil((Date.parse(`${work.estimated_end_date}T12:00:00Z`) - Date.parse(`${today}T12:00:00Z`)) / 86400000) };
+        const { date: today, time: todayTime } = localNow(work.timeZone);
+        if (materializeRecurrences)
+            await this.materializeAll(adminId, workId);
+        const [goalEntities, reportEntities, activityEntities, itemEntities, photoEntities, correctionEntities,] = await Promise.all([
+            this.db.getRepository(DailyGoal).find({
+                where: { administratorId: adminId, workId, isActive: true },
+                order: { workDate: 'DESC' },
+            }),
+            this.db.getRepository(DailyReport).find({
+                where: { administratorId: adminId, workId },
+                relations: { submittedByPerson: true },
+                order: { workDate: 'DESC' },
+            }),
+            this.db
+                .getRepository(Activity)
+                .findBy({ administratorId: adminId, workId }),
+            this.db.getRepository(DailyReportItem).find({
+                where: { administratorId: adminId, workId },
+                relations: { report: true },
+                order: { report: { workDate: 'DESC' } },
+            }),
+            this.db
+                .getRepository(ReportPhoto)
+                .findBy({ administratorId: adminId, workId }),
+            this.db.getRepository(ReportCorrection).find({
+                where: { administratorId: adminId, workId },
+                order: { createdAt: 'DESC' },
+            }),
+        ]);
+        const goals = goalEntities.map((goal) => ({
+            id: goal.id,
+            activityId: goal.activityId,
+            date: goal.workDate,
+            description: goal.description,
+            expectedQuantity: goal.expectedQuantity,
+            unit: goal.unit,
+            quantityStep: goal.quantityStep,
+            quantityDecimals: goal.quantityDecimals,
+        }));
+        const reports = reportEntities.map((report) => {
+            const responsibleName = report.submittedByPerson?.fullName ?? report.foremanNameSnapshot;
+            return {
+                id: report.id,
+                date: report.workDate,
+                foremanName: responsibleName,
+                submittedByPersonId: report.submittedByPersonId,
+                submittedBy: {
+                    personId: report.submittedByPersonId,
+                    name: responsibleName,
+                    accessType: report.submittedByPersonId ? 'PERSONAL' : 'LEGACY',
+                },
+                observations: report.observations,
+                submittedAt: report.submittedAt,
+                updatedAt: report.updatedAt,
+            };
         });
-        return { today, todayTime, work: { id: work.id, name: work.name, description: work.description, location: work.location, startDate: work.start_date, estimatedEndDate: work.estimated_end_date, status: work.status, foremanId: work.foreman_id, timeZone: work.time_zone, closeTime: work.close_time, accessAlias: work.access_alias }, goals, reports, items, photos, corrections, progress, activities };
+        const activities = activityEntities.map((activity) => ({
+            id: activity.id,
+            name: activity.name,
+            unit: activity.unit,
+            customUnit: activity.customUnit,
+            quantityStep: activity.quantityStep,
+            quantityDecimals: activity.quantityDecimals,
+        }));
+        const items = itemEntities.map((item) => ({
+            reportId: item.reportId,
+            activityId: item.activityId,
+            goalId: item.goalId,
+            description: item.descriptionSnapshot,
+            expected: item.expectedQuantitySnapshot,
+            actual: item.actualQuantity,
+            unit: item.unitSnapshot,
+            date: item.report.workDate,
+        }));
+        const photos = photoEntities.map((photo) => ({
+            id: photo.id,
+            reportId: photo.reportId,
+        }));
+        const corrections = correctionEntities.map((item) => ({
+            id: item.id,
+            reportId: item.reportId,
+            before: item.beforeValue,
+            after: item.afterValue,
+            reason: item.reason,
+            createdAt: item.createdAt,
+        }));
+        const progress = activities.map((activity) => {
+            const planned = goals
+                .filter((g) => g.activityId === activity.id && g.date <= today)
+                .reduce((s, g) => s + number(g.expectedQuantity), 0);
+            const executed = items
+                .filter((i) => i.activityId === activity.id && i.date <= today)
+                .reduce((s, i) => s + number(i.actual), 0);
+            const reportedDays = new Set(items
+                .filter((i) => i.activityId === activity.id && i.date <= today)
+                .map((i) => i.date)).size;
+            const remaining = goals
+                .filter((g) => g.activityId === activity.id && g.date > today)
+                .reduce((s, g) => s + number(g.expectedQuantity), 0);
+            const rate = reportedDays >= 2 ? executed / reportedDays : null;
+            const projectedDays = rate && rate > 0
+                ? Math.ceil(Math.max(0, planned + remaining - executed) / rate)
+                : null;
+            return {
+                activityId: activity.id,
+                name: activity.name,
+                unit: activity.unit,
+                planned,
+                executed,
+                difference: executed - planned,
+                compliance: planned > 0 ? Math.round(percentage(executed, planned)) : null,
+                projectedDays,
+                risk: projectedDays !== null &&
+                    projectedDays >
+                        Math.ceil((Date.parse(`${work.estimatedEndDate}T12:00:00Z`) -
+                            Date.parse(`${today}T12:00:00Z`)) /
+                            86400000),
+            };
+        });
+        return {
+            today,
+            todayTime,
+            work: {
+                id: work.id,
+                name: work.name,
+                description: work.description,
+                location: work.location,
+                startDate: work.startDate,
+                estimatedEndDate: work.estimatedEndDate,
+                status: work.status,
+                foremanId: work.foremanId,
+                timeZone: work.timeZone,
+                closeTime: work.closeTime,
+                accessAlias: work.accessAlias,
+            },
+            goals,
+            reports,
+            items,
+            photos,
+            corrections,
+            progress,
+            activities,
+        };
     }
 };
 AdminService = __decorate([
@@ -301,21 +889,51 @@ let AdminController = class AdminController {
     constructor(service) {
         this.service = service;
     }
-    foremen(req) { return this.service.foremen(req.administratorId); }
-    createForeman(req, body) { return this.service.saveForeman(req.administratorId, body); }
-    updateForeman(req, id, body) { return this.service.saveForeman(req.administratorId, body, id); }
-    works(req) { return this.service.works(req.administratorId); }
-    createWork(req, body) { return this.service.saveWork(req.administratorId, body); }
-    updateWork(req, id, body) { return this.service.saveWork(req.administratorId, body, id); }
-    rotateCode(req, id) { return this.service.rotateCode(req.administratorId, id); }
-    detail(req, id) { return this.service.workDetail(req.administratorId, id); }
-    goals(req, id, date) { return this.service.goals(req.administratorId, id, validDate(date)); }
-    createGoal(req, id, body) { return this.service.createGoal(req.administratorId, id, body); }
-    updateGoal(req, id, goalId, body) { return this.service.updateGoal(req.administratorId, id, goalId, body); }
-    copy(req, id, body) { return this.service.copyGoals(req.administratorId, id, body.date); }
-    recurrences(req, id) { return this.service.recurrences(req.administratorId, id); }
-    deactivate(req, id, recurrenceId) { return this.service.deactivateRecurrence(req.administratorId, id, recurrenceId); }
-    dashboard(req) { return this.service.dashboard(req.administratorId); }
+    foremen(req) {
+        return this.service.foremen(req.administratorId);
+    }
+    createForeman(req, body) {
+        return this.service.saveForeman(req.administratorId, body);
+    }
+    updateForeman(req, id, body) {
+        return this.service.saveForeman(req.administratorId, body, id);
+    }
+    works(req) {
+        return this.service.works(req.administratorId);
+    }
+    createWork(req, body) {
+        return this.service.saveWork(req.administratorId, body);
+    }
+    updateWork(req, id, body) {
+        return this.service.saveWork(req.administratorId, body, id);
+    }
+    rotateCode(req, id) {
+        return this.service.rotateCode(req.administratorId, id);
+    }
+    detail(req, id) {
+        return this.service.workDetail(req.administratorId, id);
+    }
+    goals(req, id, date) {
+        return this.service.goals(req.administratorId, id, validDate(date));
+    }
+    createGoal(req, id, body) {
+        return this.service.createGoal(req.administratorId, id, body);
+    }
+    updateGoal(req, id, goalId, body) {
+        return this.service.updateGoal(req.administratorId, id, goalId, body);
+    }
+    copy(req, id, body) {
+        return this.service.copyGoals(req.administratorId, id, body.date);
+    }
+    recurrences(req, id) {
+        return this.service.recurrences(req.administratorId, id);
+    }
+    deactivate(req, id, recurrenceId) {
+        return this.service.deactivateRecurrence(req.administratorId, id, recurrenceId);
+    }
+    dashboard(req) {
+        return this.service.dashboard(req.administratorId);
+    }
 };
 __decorate([
     Get('foremen'),

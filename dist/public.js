@@ -10,15 +10,16 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 var __param = (this && this.__param) || function (paramIndex, decorator) {
     return function (target, key) { decorator(target, key, paramIndex); }
 };
-import { BadRequestException, Body, Controller, Get, Inject, Injectable, Param, Post, Req, Res, UploadedFile, UseInterceptors, HttpException, HttpStatus, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Inject, Injectable, NotFoundException, Param, Post, Req, Res, UploadedFile, UseInterceptors, HttpException, HttpStatus, UnauthorizedException, } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { JwtService } from '@nestjs/jwt';
 import { compare, hash } from 'bcryptjs';
 import { DB } from './database.module.js';
+import { DailyGoal, DailyReport, Work } from './database/entities.js';
 import { AdminService } from './admin.js';
 import { normalizeAlias } from './admin.js';
 import { ReportsService } from './reports.js';
-import { codeHash, localNow, one } from './shared.js';
+import { codeHash, localNow } from './shared.js';
 let PublicService = class PublicService {
     db;
     admin;
@@ -34,9 +35,16 @@ let PublicService = class PublicService {
     }
     async aliases(ip) {
         this.limit(ip);
-        return this.db.query(`SELECT w.access_alias AS alias FROM works w JOIN foremen f ON f.id=w.foreman_id
-      WHERE w.access_alias IS NOT NULL AND w.status='ACTIVA' AND f.is_active=true
-      ORDER BY w.access_alias`);
+        return this.db
+            .getRepository(Work)
+            .createQueryBuilder('work')
+            .innerJoin('work.primaryForeman', 'foreman')
+            .select('work.accessAlias', 'alias')
+            .where('work.accessAlias IS NOT NULL')
+            .andWhere('work.status = :status', { status: 'ACTIVA' })
+            .andWhere('foreman.isActive = :active', { active: true })
+            .orderBy('work.accessAlias', 'ASC')
+            .getRawMany();
     }
     async aliasLogin(aliasInput, pin, ip) {
         this.limit(ip);
@@ -44,7 +52,9 @@ let PublicService = class PublicService {
         const key = `${ip}:${alias ?? ''}`;
         const now = Date.now();
         const item = this.aliasAttempts.get(key);
-        const next = !item || item.until < now ? { count: 1, until: now + 15 * 60_000 } : { count: item.count + 1, until: item.until };
+        const next = !item || item.until < now
+            ? { count: 1, until: now + 15 * 60_000 }
+            : { count: item.count + 1, until: item.until };
         this.aliasAttempts.set(key, next);
         if (next.count > 8)
             throw new HttpException('Demasiados intentos; volvé a intentar más tarde', HttpStatus.TOO_MANY_REQUESTS);
@@ -52,17 +62,33 @@ let PublicService = class PublicService {
             for (const [k, v] of this.aliasAttempts)
                 if (v.until < now)
                     this.aliasAttempts.delete(k);
-        const rows = alias && typeof pin === 'string' && /^\d{6}$/.test(pin)
-            ? await this.db.query(`SELECT w.id,w.alias_pin_hash,w.alias_session_version FROM works w JOIN foremen f ON f.id=w.foreman_id WHERE w.access_alias=$1 AND w.status='ACTIVA' AND f.is_active=true`, [alias]) : [];
-        const work = rows[0];
-        const valid = work ? await compare(pin, work.alias_pin_hash) : false;
+        const work = alias && typeof pin === 'string' && /^\d{6}$/.test(pin)
+            ? await this.db
+                .getRepository(Work)
+                .createQueryBuilder('work')
+                .innerJoin('work.primaryForeman', 'foreman')
+                .addSelect('work.aliasPinHash')
+                .where('work.accessAlias = :alias', { alias })
+                .andWhere('work.status = :status', { status: 'ACTIVA' })
+                .andWhere('foreman.isActive = :active', { active: true })
+                .getOne()
+            : null;
+        const valid = work
+            ? await compare(pin, work.aliasPinHash)
+            : false;
         if (!work)
             await hash('000000', 12);
-        if (!valid) {
+        if (!work || !valid) {
             throw new UnauthorizedException('Alias o PIN incorrectos');
         }
         this.aliasAttempts.delete(key);
-        return { accessToken: await this.jwt.signAsync({ type: 'foreman', workId: work.id, version: String(work.alias_session_version) }, { expiresIn: '8h' }) };
+        return {
+            accessToken: await this.jwt.signAsync({
+                type: 'foreman',
+                workId: work.id,
+                version: String(work.aliasSessionVersion),
+            }, { expiresIn: '8h' }),
+        };
     }
     async session(req) {
         const header = req.headers.authorization ?? '';
@@ -72,10 +98,18 @@ let PublicService = class PublicService {
             const payload = await this.jwt.verifyAsync(header.slice(7));
             if (payload.type !== 'foreman' || !payload.workId)
                 throw new Error('invalid');
-            const rows = await this.db.query(`SELECT w.*,f.first_name||' '||f.last_name AS foreman_name FROM works w JOIN foremen f ON f.id=w.foreman_id WHERE w.id=$1 AND w.access_alias IS NOT NULL AND w.status='ACTIVA' AND f.is_active=true`, [payload.workId]);
-            if (!rows.length || String(rows[0].alias_session_version) !== payload.version)
+            const work = await this.db.getRepository(Work).findOne({
+                where: { id: payload.workId, status: 'ACTIVA' },
+                relations: { primaryForeman: true },
+            });
+            if (!work ||
+                !work.accessAlias ||
+                !work.primaryForeman.isActive ||
+                String(work.aliasSessionVersion) !== payload.version)
                 throw new Error('revoked');
-            return rows[0];
+            return Object.assign(work, {
+                foremanName: `${work.primaryForeman.firstName} ${work.primaryForeman.lastName}`,
+            });
         }
         catch {
             throw new UnauthorizedException('La sesión del capataz venció. Volvé a ingresar.');
@@ -84,7 +118,9 @@ let PublicService = class PublicService {
     limit(ip) {
         const now = Date.now();
         const item = this.attempts.get(ip);
-        const next = !item || item.until < now ? { count: 1, until: now + 60_000 } : { count: item.count + 1, until: item.until };
+        const next = !item || item.until < now
+            ? { count: 1, until: now + 60_000 }
+            : { count: item.count + 1, until: item.until };
         this.attempts.set(ip, next);
         if (next.count > 60)
             throw new HttpException('Demasiados intentos; esperá un minuto', HttpStatus.TOO_MANY_REQUESTS);
@@ -97,35 +133,69 @@ let PublicService = class PublicService {
         this.limit(ip);
         if (!/^[A-Za-z0-9_-]{32}$/.test(code))
             throw new BadRequestException('Código inválido');
-        return one(this.db, 'SELECT w.*,f.first_name||\' \'||f.last_name AS foreman_name FROM works w JOIN foremen f ON f.id=w.foreman_id WHERE w.access_code_hash=$1', [codeHash(code)]);
+        const work = await this.db.getRepository(Work).findOne({
+            where: { accessCodeHash: codeHash(code) },
+            relations: { primaryForeman: true },
+        });
+        if (!work)
+            throw new NotFoundException('Recurso no encontrado');
+        return Object.assign(work, {
+            foremanName: `${work.primaryForeman.firstName} ${work.primaryForeman.lastName}`,
+        });
     }
     async today(code, ip) {
         return this.todayFor(await this.resolve(code, ip));
     }
     async todayFor(work) {
-        const { date, time } = localNow(work.time_zone);
-        await this.admin.materialize(work.administrator_id, work.id, date);
-        const goals = await this.db.query('SELECT id,description,expected_quantity AS "expectedQuantity",unit,custom_unit AS "customUnit",quantity_step AS "quantityStep",quantity_decimals AS "quantityDecimals" FROM daily_goals WHERE work_id=$1 AND work_date=$2 AND is_active=true ORDER BY created_at,id', [work.id, date]);
-        const rows = await this.db.query('SELECT id FROM daily_reports WHERE work_id=$1 AND work_date=$2', [work.id, date]);
-        const report = rows.length ? await this.reports.detail(rows[0].id, work.administrator_id) : null;
-        return { work: { id: work.id, name: work.name, foremanName: work.foreman_name }, date, goals, report, editable: work.status === 'ACTIVA' && time < work.close_time.slice(0, 5), closeTime: work.close_time.slice(0, 5) };
+        const { date, time } = localNow(work.timeZone);
+        await this.admin.materialize(work.administratorId, work.id, date);
+        const goalEntities = await this.db.getRepository(DailyGoal).find({
+            where: { workId: work.id, workDate: date, isActive: true },
+            order: { createdAt: 'ASC', id: 'ASC' },
+        });
+        const goals = goalEntities.map((goal) => ({
+            id: goal.id,
+            description: goal.description,
+            expectedQuantity: goal.expectedQuantity,
+            unit: goal.unit,
+            customUnit: goal.customUnit,
+            quantityStep: goal.quantityStep,
+            quantityDecimals: goal.quantityDecimals,
+        }));
+        const existing = await this.db.getRepository(DailyReport).findOne({
+            select: { id: true },
+            where: { workId: work.id, workDate: date },
+        });
+        const report = existing
+            ? await this.reports.detail(existing.id, work.administratorId)
+            : null;
+        return {
+            work: { id: work.id, name: work.name, foremanName: work.foremanName },
+            date,
+            goals,
+            report,
+            editable: work.status === 'ACTIVA' && time < work.closeTime.slice(0, 5),
+            closeTime: work.closeTime.slice(0, 5),
+        };
     }
     async submit(code, ip, body) {
         return this.reports.submit(await this.resolve(code, ip), body);
     }
     async upload(code, ip, reportId, file) {
         const work = await this.resolve(code, ip);
-        return this.reports.uploadPhoto(work.administrator_id, reportId, file, work);
+        return this.reports.uploadPhoto(work.administratorId, reportId, file, work);
     }
     async photo(code, ip, photoId) {
         const work = await this.resolve(code, ip);
-        return this.reports.photo(work.administrator_id, photoId, work.id);
+        return this.reports.photo(work.administratorId, photoId, work.id);
     }
 };
 PublicService = __decorate([
     Injectable(),
     __param(0, Inject(DB)),
-    __metadata("design:paramtypes", [Function, AdminService, ReportsService, JwtService])
+    __metadata("design:paramtypes", [Function, AdminService,
+        ReportsService,
+        JwtService])
 ], PublicService);
 export { PublicService };
 let AliasController = class AliasController {
@@ -135,12 +205,28 @@ let AliasController = class AliasController {
         this.service = service;
         this.reports = reports;
     }
-    aliases(req) { return this.service.aliases(req.ip ?? 'unknown'); }
-    login(body, req) { return this.service.aliasLogin(body?.alias, body?.pin, req.ip ?? 'unknown'); }
-    async today(req) { return this.service.todayFor(await this.service.session(req)); }
-    async submit(req, body) { return this.reports.submit(await this.service.session(req), body); }
-    async upload(req, id, file) { const work = await this.service.session(req); return this.reports.uploadPhoto(work.administrator_id, id, file, work); }
-    async photo(req, id, res) { const work = await this.service.session(req); res.type('image/webp').send(await this.reports.photo(work.administrator_id, id, work.id)); }
+    aliases(req) {
+        return this.service.aliases(req.ip ?? 'unknown');
+    }
+    login(body, req) {
+        return this.service.aliasLogin(body?.alias, body?.pin, req.ip ?? 'unknown');
+    }
+    async today(req) {
+        return this.service.todayFor(await this.service.session(req));
+    }
+    async submit(req, body) {
+        return this.reports.submit(await this.service.session(req), body);
+    }
+    async upload(req, id, file) {
+        const work = await this.service.session(req);
+        return this.reports.uploadPhoto(work.administratorId, id, file, work);
+    }
+    async photo(req, id, res) {
+        const work = await this.service.session(req);
+        res
+            .type('image/webp')
+            .send(await this.reports.photo(work.administratorId, id, work.id));
+    }
 };
 __decorate([
     Get('aliases'),
@@ -193,7 +279,8 @@ __decorate([
 ], AliasController.prototype, "photo", null);
 AliasController = __decorate([
     Controller('public'),
-    __metadata("design:paramtypes", [PublicService, ReportsService])
+    __metadata("design:paramtypes", [PublicService,
+        ReportsService])
 ], AliasController);
 export { AliasController };
 let PublicController = class PublicController {
@@ -201,10 +288,20 @@ let PublicController = class PublicController {
     constructor(service) {
         this.service = service;
     }
-    today(code, req) { return this.service.today(code, req.ip ?? 'unknown'); }
-    submit(code, req, body) { return this.service.submit(code, req.ip ?? 'unknown', body); }
-    upload(code, req, id, file) { return this.service.upload(code, req.ip ?? 'unknown', id, file); }
-    async photo(code, req, id, res) { res.type('image/webp').send(await this.service.photo(code, req.ip ?? 'unknown', id)); }
+    today(code, req) {
+        return this.service.today(code, req.ip ?? 'unknown');
+    }
+    submit(code, req, body) {
+        return this.service.submit(code, req.ip ?? 'unknown', body);
+    }
+    upload(code, req, id, file) {
+        return this.service.upload(code, req.ip ?? 'unknown', id, file);
+    }
+    async photo(code, req, id, res) {
+        res
+            .type('image/webp')
+            .send(await this.service.photo(code, req.ip ?? 'unknown', id));
+    }
 };
 __decorate([
     Get('today'),
