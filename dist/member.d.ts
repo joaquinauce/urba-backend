@@ -1,6 +1,7 @@
 import type { Response } from 'express';
 import { type DataSource } from 'typeorm';
 import { AdminService } from './admin.js';
+import { AuthService } from './auth.js';
 import { WorkAuthorizationService, type PersonRequest } from './people-auth.js';
 import { ReportsService } from './reports.js';
 export declare class MemberService {
@@ -195,7 +196,14 @@ export declare class MemberService {
 }
 export declare class MemberController {
     private readonly members;
-    constructor(members: MemberService);
+    private readonly auth;
+    constructor(members: MemberService, auth: AuthService);
+    password(req: PersonRequest, body: {
+        currentPassword?: unknown;
+        newPassword?: unknown;
+    }): Promise<{
+        updated: boolean;
+    }>;
     works(request: PersonRequest): Promise<{
         id: string;
         name: string;

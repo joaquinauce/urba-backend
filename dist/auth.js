@@ -10,9 +10,9 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 var __param = (this && this.__param) || function (paramIndex, decorator) {
     return function (target, key) { decorator(target, key, paramIndex); }
 };
-import { Body, Controller, Injectable, Post, Get, UseGuards, UnauthorizedException, Inject, Req, } from '@nestjs/common';
+import { Body, Controller, Injectable, Post, Get, UseGuards, UnauthorizedException, BadRequestException, Inject, Req, } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { compare } from 'bcryptjs';
+import { compare, hash } from 'bcryptjs';
 import { DB } from './database.module.js';
 import { Administrator, Person, PersonRole } from './database/entities.js';
 let AuthService = class AuthService {
@@ -90,6 +90,34 @@ let AuthService = class AuthService {
                 role: 'ADMINISTRATOR',
             },
         };
+    }
+    async changePassword(administratorId, administratorPersonId, body) {
+        if (typeof body?.currentPassword !== 'string' || typeof body?.newPassword !== 'string' || body.newPassword.length < 10)
+            throw new BadRequestException('Ingresá tu clave actual y una nueva de al menos 10 caracteres');
+        if (administratorPersonId)
+            return this.changePersonPassword(administratorPersonId, body.currentPassword, body.newPassword);
+        const repository = this.db.getRepository(Administrator);
+        const administrator = await repository.createQueryBuilder('administrator').addSelect('administrator.passwordHash')
+            .where('administrator.id = :id', { id: administratorId }).getOne();
+        if (!administrator || !(await compare(body.currentPassword, administrator.passwordHash)))
+            throw new UnauthorizedException('La clave actual es incorrecta');
+        administrator.passwordHash = await hash(body.newPassword, 12);
+        await repository.save(administrator);
+        return { updated: true };
+    }
+    async changePersonPassword(personId, currentPassword, newPassword) {
+        if (newPassword.length < 10)
+            throw new BadRequestException('La nueva clave debe tener al menos 10 caracteres');
+        const repository = this.db.getRepository(Person);
+        const person = await repository.createQueryBuilder('person').addSelect('person.passwordHash')
+            .where('person.id = :id', { id: personId }).getOne();
+        if (!person?.passwordHash || !(await compare(currentPassword, person.passwordHash)))
+            throw new UnauthorizedException('La clave actual es incorrecta');
+        person.passwordHash = await hash(newPassword, 12);
+        person.sessionVersion = String(BigInt(person.sessionVersion) + 1n);
+        person.updatedAt = new Date();
+        await repository.save(person);
+        return { updated: true };
     }
 };
 AuthService = __decorate([
@@ -170,6 +198,9 @@ let AuthController = class AuthController {
         });
         return administrator ? { ...administrator, role: 'ADMINISTRATOR' } : undefined;
     }
+    password(req, body) {
+        return this.auth.changePassword(req.administratorId, req.administratorPersonId, body);
+    }
 };
 __decorate([
     Post('login'),
@@ -187,6 +218,15 @@ __decorate([
     __metadata("design:paramtypes", [Object]),
     __metadata("design:returntype", Promise)
 ], AuthController.prototype, "me", null);
+__decorate([
+    UseGuards(JwtGuard),
+    Post('password'),
+    __param(0, Req()),
+    __param(1, Body()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object]),
+    __metadata("design:returntype", void 0)
+], AuthController.prototype, "password", null);
 AuthController = __decorate([
     Controller('auth'),
     __param(1, Inject(DB)),

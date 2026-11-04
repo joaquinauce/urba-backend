@@ -17,6 +17,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import { In, IsNull, type DataSource } from 'typeorm';
 import { AdminService } from './admin.js';
+import { AuthService } from './auth.js';
 import { DB } from './database.module.js';
 import {
   DailyReport,
@@ -158,7 +159,10 @@ export class MemberService {
 @UseGuards(PersonJwtGuard)
 @Controller('member')
 export class MemberController {
-  constructor(private readonly members: MemberService) {}
+  constructor(private readonly members: MemberService, private readonly auth: AuthService) {}
+  @Post('password') password(@Req() req: PersonRequest, @Body() body: { currentPassword?: unknown; newPassword?: unknown }) {
+    return this.auth.changePersonPassword(req.actor.id, String(body?.currentPassword ?? ''), String(body?.newPassword ?? ''));
+  }
 
   @Get('works')
   works(@Req() request: PersonRequest) {

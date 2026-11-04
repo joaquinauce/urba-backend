@@ -8,11 +8,12 @@ import {
   CanActivate,
   ExecutionContext,
   UnauthorizedException,
+  BadRequestException,
   Inject,
   Req,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { compare } from 'bcryptjs';
+import { compare, hash } from 'bcryptjs';
 import type { Request } from 'express';
 import type { DataSource } from 'typeorm';
 import { DB } from './database.module.js';
@@ -99,6 +100,34 @@ export class AuthService {
       },
     };
   }
+
+  async changePassword(administratorId: string, administratorPersonId: string | undefined, body: { currentPassword?: unknown; newPassword?: unknown }) {
+    if (typeof body?.currentPassword !== 'string' || typeof body?.newPassword !== 'string' || body.newPassword.length < 10)
+      throw new BadRequestException('Ingresá tu clave actual y una nueva de al menos 10 caracteres');
+    if (administratorPersonId) return this.changePersonPassword(administratorPersonId, body.currentPassword, body.newPassword);
+    const repository = this.db.getRepository(Administrator);
+    const administrator = await repository.createQueryBuilder('administrator').addSelect('administrator.passwordHash')
+      .where('administrator.id = :id', { id: administratorId }).getOne();
+    if (!administrator || !(await compare(body.currentPassword, administrator.passwordHash)))
+      throw new UnauthorizedException('La clave actual es incorrecta');
+    administrator.passwordHash = await hash(body.newPassword, 12);
+    await repository.save(administrator);
+    return { updated: true };
+  }
+
+  async changePersonPassword(personId: string, currentPassword: string, newPassword: string) {
+    if (newPassword.length < 10) throw new BadRequestException('La nueva clave debe tener al menos 10 caracteres');
+    const repository = this.db.getRepository(Person);
+    const person = await repository.createQueryBuilder('person').addSelect('person.passwordHash')
+      .where('person.id = :id', { id: personId }).getOne();
+    if (!person?.passwordHash || !(await compare(currentPassword, person.passwordHash)))
+      throw new UnauthorizedException('La clave actual es incorrecta');
+    person.passwordHash = await hash(newPassword, 12);
+    person.sessionVersion = String(BigInt(person.sessionVersion) + 1n);
+    person.updatedAt = new Date();
+    await repository.save(person);
+    return { updated: true };
+  }
 }
 
 @Injectable()
@@ -168,5 +197,8 @@ export class AuthController {
       where: { id: req.administratorId },
     });
     return administrator ? { ...administrator, role: 'ADMINISTRATOR' } : undefined;
+  }
+  @UseGuards(JwtGuard) @Post('password') password(@Req() req: AdminRequest, @Body() body: { currentPassword?: unknown; newPassword?: unknown }) {
+    return this.auth.changePassword(req.administratorId, req.administratorPersonId, body);
   }
 }

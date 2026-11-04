@@ -14,6 +14,7 @@ import { Body, Controller, Get, Inject, Injectable, NotFoundException, Param, Po
 import { FileInterceptor } from '@nestjs/platform-express';
 import { In, IsNull } from 'typeorm';
 import { AdminService } from './admin.js';
+import { AuthService } from './auth.js';
 import { DB } from './database.module.js';
 import { DailyReport, ReportPhoto, WorkAssignment, } from './database/entities.js';
 import { PersonJwtGuard, WorkAuthorizationService, } from './people-auth.js';
@@ -116,8 +117,13 @@ MemberService = __decorate([
 export { MemberService };
 let MemberController = class MemberController {
     members;
-    constructor(members) {
+    auth;
+    constructor(members, auth) {
         this.members = members;
+        this.auth = auth;
+    }
+    password(req, body) {
+        return this.auth.changePersonPassword(req.actor.id, String(body?.currentPassword ?? ''), String(body?.newPassword ?? ''));
     }
     works(request) {
         return this.members.works(request);
@@ -143,6 +149,14 @@ let MemberController = class MemberController {
             .send(await this.members.photo(request, photoId));
     }
 };
+__decorate([
+    Post('password'),
+    __param(0, Req()),
+    __param(1, Body()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object]),
+    __metadata("design:returntype", void 0)
+], MemberController.prototype, "password", null);
 __decorate([
     Get('works'),
     __param(0, Req()),
@@ -206,7 +220,7 @@ __decorate([
 MemberController = __decorate([
     UseGuards(PersonJwtGuard),
     Controller('member'),
-    __metadata("design:paramtypes", [MemberService])
+    __metadata("design:paramtypes", [MemberService, AuthService])
 ], MemberController);
 export { MemberController };
 //# sourceMappingURL=member.js.map

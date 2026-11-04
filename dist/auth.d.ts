@@ -31,6 +31,15 @@ export declare class AuthService {
         };
         administrator?: undefined;
     }>;
+    changePassword(administratorId: string, administratorPersonId: string | undefined, body: {
+        currentPassword?: unknown;
+        newPassword?: unknown;
+    }): Promise<{
+        updated: boolean;
+    }>;
+    changePersonPassword(personId: string, currentPassword: string, newPassword: string): Promise<{
+        updated: boolean;
+    }>;
 }
 export declare class JwtGuard implements CanActivate {
     private readonly jwt;
@@ -101,4 +110,10 @@ export declare class AuthController {
         works: import("typeorm").Relation<import("./database/entities.js").Work[]>;
         person: import("typeorm").Relation<Person | null>;
     } | undefined>;
+    password(req: AdminRequest, body: {
+        currentPassword?: unknown;
+        newPassword?: unknown;
+    }): Promise<{
+        updated: boolean;
+    }>;
 }
