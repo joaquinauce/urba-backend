@@ -660,6 +660,8 @@ export class Role {
 @Unique('people_administrator_source_uq', ['administratorSourceId'])
 @Unique('people_foreman_source_uq', ['foremanSourceId'])
 @Check('people_name_not_blank', `length(btrim(full_name)) > 0`)
+@Check('people_credentials_complete', `(email IS NULL) = (password_hash IS NULL)`)
+@Check('people_email_not_blank', `email IS NULL OR length(btrim(email)) > 0`)
 @Check(
   'people_source_valid',
   `NOT (administrator_source_id IS NOT NULL AND foreman_source_id IS NOT NULL)`,
@@ -680,6 +682,7 @@ export class Role {
 @Check('people_session_version_valid', `session_version >= 0`)
 @Check('people_failed_attempts_valid', `failed_attempts >= 0`)
 @Index('people_administrator_active_idx', ['administratorId', 'isActive'])
+@Index('people_email_lower_uq', { synchronize: false })
 @Index('people_pin_lookup_hmac_uq', ['pinLookupHmac'], {
   unique: true,
   where: 'pin_lookup_hmac IS NOT NULL',
@@ -692,6 +695,8 @@ export class Person {
   @Column('uuid', { name: 'foreman_source_id', nullable: true })
   foremanSourceId!: string | null;
   @Column('varchar', { name: 'full_name', length: 201 }) fullName!: string;
+  @Column('varchar', { length: 320, nullable: true }) email!: string | null;
+  @Column('varchar', { name: 'password_hash', length: 255, nullable: true, select: false }) passwordHash!: string | null;
   @Column('boolean', { name: 'is_active', default: true }) isActive!: boolean;
   @Column('varchar', {
     name: 'pin_hash',

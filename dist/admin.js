@@ -16,7 +16,7 @@ import QRCode from 'qrcode';
 import { hash } from 'bcryptjs';
 import { DB } from './database.module.js';
 import { JwtGuard } from './auth.js';
-import { Activity, DailyGoal, DailyReport, DailyReportItem, Foreman, GoalRecurrence, ReportCorrection, ReportPhoto, Work, } from './database/entities.js';
+import { Activity, DailyGoal, DailyReport, DailyReportItem, Foreman, Person, PersonRole, GoalRecurrence, ReportCorrection, ReportPhoto, Work, WorkAssignment, } from './database/entities.js';
 import { code, codeHash, customQuantityConfig, localNow, number, optional, percentage, quantityForUnit, reportSummary, required, uuid, validDate, validUnit, } from './shared.js';
 export function normalizeAlias(value) {
     if (value === null || value === undefined || value === '')
@@ -216,26 +216,46 @@ let AdminService = class AdminService {
         }
         if (alias && !body.aliasPin)
             throw new BadRequestException('Definí un PIN para habilitar el alias');
+        const assignments = body.assignments ?? [];
+        if (!Array.isArray(assignments) || assignments.some((assignment) => !assignment || typeof assignment.personId !== 'string' ||
+            !['SITE_MANAGER', 'FOREMAN'].includes(assignment.roleCode)))
+            throw new BadRequestException('Responsables inválidos');
+        const keys = assignments.map((assignment) => `${assignment.personId}:${assignment.roleCode}`);
+        if (new Set(keys).size !== keys.length)
+            throw new BadRequestException('Responsables repetidos');
         const pinHash = alias ? await hash(validPin(body.aliasPin), 12) : null;
         const accessCode = code();
         const workId = uuid();
         try {
-            await repository.save(repository.create({
-                id: workId,
-                administratorId: adminId,
-                foremanId: body.foremanId,
-                name,
-                description,
-                location,
-                startDate: start,
-                estimatedEndDate: end,
-                status,
-                timeZone,
-                closeTime,
-                accessCodeHash: codeHash(accessCode),
-                accessAlias: alias,
-                aliasPinHash: pinHash,
-            }));
+            await this.db.transaction(async (manager) => {
+                for (const assignment of assignments) {
+                    const person = await manager.getRepository(Person).findOneBy({ id: assignment.personId, administratorId: adminId, isActive: true });
+                    const role = await manager.getRepository(PersonRole).findOneBy({ personId: assignment.personId, administratorId: adminId, roleCode: assignment.roleCode });
+                    if (!person || !role)
+                        throw new BadRequestException('Responsable no disponible para ese rol');
+                }
+                await manager.getRepository(Work).save(manager.getRepository(Work).create({
+                    id: workId,
+                    administratorId: adminId,
+                    foremanId: body.foremanId,
+                    name,
+                    description,
+                    location,
+                    startDate: start,
+                    estimatedEndDate: end,
+                    status,
+                    timeZone,
+                    closeTime,
+                    accessCodeHash: codeHash(accessCode),
+                    accessAlias: alias,
+                    aliasPinHash: pinHash,
+                }));
+                if (assignments.length)
+                    await manager.getRepository(WorkAssignment).insert(assignments.map((assignment) => ({
+                        id: uuid(), administratorId: adminId, workId, personId: assignment.personId,
+                        roleCode: assignment.roleCode, isPrimary: false,
+                    })));
+            });
         }
         catch (error) {
             if (error.code === '23505')

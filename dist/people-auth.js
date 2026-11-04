@@ -99,7 +99,7 @@ let PersonAuthService = class PersonAuthService {
             const roles = (await manager.getRepository(PersonRole).findBy({
                 personId: person.id,
                 administratorId: person.administratorId,
-                roleCode: In([...PERSONAL_ROLES]),
+                roleCode: 'FOREMAN',
             })).map((role) => role.roleCode);
             if (!roles.length)
                 return { state: 'denied', person, locked: false };
@@ -194,10 +194,8 @@ let WorkAuthorizationService = class WorkAuthorizationService {
     constructor(db) {
         this.db = db;
     }
-    async authorize(actor, workId, write = false) {
-        const allowedRoles = write
-            ? ['FOREMAN']
-            : ['SITE_MANAGER', 'FOREMAN'];
+    async authorize(actor, workId, _write = false) {
+        const allowedRoles = ['SITE_MANAGER', 'FOREMAN'];
         const effectiveRoles = actor.roles.filter((role) => allowedRoles.includes(role));
         if (!effectiveRoles.length)
             throw new ForbiddenException('El perfil no permite esta operación');

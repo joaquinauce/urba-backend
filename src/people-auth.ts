@@ -131,7 +131,7 @@ export class PersonAuthService {
         await manager.getRepository(PersonRole).findBy({
           personId: person.id,
           administratorId: person.administratorId,
-          roleCode: In([...PERSONAL_ROLES]),
+          roleCode: 'FOREMAN',
         })
       ).map((role) => role.roleCode as PersonalRole);
       if (!roles.length)
@@ -224,10 +224,8 @@ export class PersonJwtGuard implements CanActivate {
 export class WorkAuthorizationService {
   constructor(@Inject(DB) private readonly db: DataSource) {}
 
-  async authorize(actor: PersonActor, workId: string, write = false) {
-    const allowedRoles: PersonalRole[] = write
-      ? ['FOREMAN']
-      : ['SITE_MANAGER', 'FOREMAN'];
+  async authorize(actor: PersonActor, workId: string, _write = false) {
+    const allowedRoles: PersonalRole[] = ['SITE_MANAGER', 'FOREMAN'];
     const effectiveRoles = actor.roles.filter((role) =>
       allowedRoles.includes(role),
     );

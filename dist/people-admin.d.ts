@@ -1,5 +1,7 @@
 import { type DataSource } from 'typeorm';
 import { type AdminRequest } from './auth.js';
+import { type PersonalRole } from './people-auth.js';
+type ManagedRole = PersonalRole | 'ADMINISTRATOR';
 export declare class PeopleAdminService {
     private readonly db;
     constructor(db: DataSource);
@@ -9,6 +11,8 @@ export declare class PeopleAdminService {
         fullName: string;
         isActive: boolean;
         hasCode: boolean;
+        email: string | null;
+        hasPassword: boolean;
         failedAttempts: number;
         lockedUntil: Date | null;
         lastAccessAt: Date | null;
@@ -18,19 +22,25 @@ export declare class PeopleAdminService {
     create(administratorId: string, body: {
         fullName?: unknown;
         roles?: unknown;
+        email?: unknown;
+        password?: unknown;
     }): Promise<{
         id: string;
         fullName: string;
+        email: string | null;
         isActive: boolean;
-        roles: ("SITE_MANAGER" | "FOREMAN")[];
+        roles: ManagedRole[];
     }>;
     update(administratorId: string, id: string, body: {
         fullName?: unknown;
         isActive?: unknown;
         roles?: unknown;
+        email?: unknown;
+        password?: unknown;
     }): Promise<{
         id: string;
         fullName: string;
+        email: string | null;
         isActive: boolean;
         roles: string[];
     }>;
@@ -55,7 +65,7 @@ export declare class PeopleAdminService {
     }): Promise<{
         id: string;
         personId: string;
-        roleCode: "SITE_MANAGER" | "FOREMAN";
+        roleCode: string;
         isPrimary: boolean;
         assignedAt: Date;
     }>;
@@ -73,6 +83,8 @@ export declare class PeopleAdminController {
         fullName: string;
         isActive: boolean;
         hasCode: boolean;
+        email: string | null;
+        hasPassword: boolean;
         failedAttempts: number;
         lockedUntil: Date | null;
         lastAccessAt: Date | null;
@@ -82,12 +94,14 @@ export declare class PeopleAdminController {
     create(request: AdminRequest, body: any): Promise<{
         id: string;
         fullName: string;
+        email: string | null;
         isActive: boolean;
-        roles: ("SITE_MANAGER" | "FOREMAN")[];
+        roles: ManagedRole[];
     }>;
     update(request: AdminRequest, id: string, body: any): Promise<{
         id: string;
         fullName: string;
+        email: string | null;
         isActive: boolean;
         roles: string[];
     }>;
@@ -112,7 +126,7 @@ export declare class AssignmentAdminController {
     assign(request: AdminRequest, workId: string, body: any): Promise<{
         id: string;
         personId: string;
-        roleCode: "SITE_MANAGER" | "FOREMAN";
+        roleCode: string;
         isPrimary: boolean;
         assignedAt: Date;
     }>;
@@ -122,3 +136,4 @@ export declare class AssignmentAdminController {
         active: boolean;
     }>;
 }
+export {};

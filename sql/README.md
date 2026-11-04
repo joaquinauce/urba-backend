@@ -18,6 +18,8 @@ ejecutan manualmente. TypeORM no ejecuta migraciones ni sincroniza el esquema.
    `20261103_003_trazabilidad_responsable_informes.sql` para agregar la
    identificación personal de quien presenta cada informe.
 6. Comprobar la fila de conteos que devuelve cada script al final.
+7. Para la versión con login de jefes de obra y administradores adicionales,
+   ejecutar `database/003_people_credentials.sql` después de preparar `people`.
 
 No debe continuarse con otro script si PostgreSQL informa una excepción. El
 script usa una única transacción; cualquier precondición o control posterior

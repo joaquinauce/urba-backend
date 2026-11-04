@@ -185,6 +185,8 @@ export declare class Person {
     administratorSourceId: string | null;
     foremanSourceId: string | null;
     fullName: string;
+    email: string | null;
+    passwordHash: string | null;
     isActive: boolean;
     pinHash: string | null;
     pinLookupHmac: string | null;

@@ -34,15 +34,10 @@ describe('autorización por asignación', () => {
     roles: ['SITE_MANAGER'],
   };
 
-  it('rechaza escrituras de un jefe de obra antes de consultar la obra', async () => {
-    const findOne = vi.fn();
-    const db = {
-      getRepository: () => ({ findOne }),
-    } as any;
-    await expect(
-      new WorkAuthorizationService(db).authorize(actor, 'work-1', true),
-    ).rejects.toBeInstanceOf(ForbiddenException);
-    expect(findOne).not.toHaveBeenCalled();
+  it('permite escribir a un jefe de obra asignado', async () => {
+    const work = { id: 'work-1' };
+    const db = { getRepository: () => ({ findOne: vi.fn().mockResolvedValue({ work }) }) } as any;
+    await expect(new WorkAuthorizationService(db).authorize(actor, 'work-1', true)).resolves.toBe(work);
   });
 
   it('exige una asignación activa incluso para lectura', async () => {

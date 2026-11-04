@@ -42,7 +42,7 @@ export declare class PersonJwtGuard implements CanActivate {
 export declare class WorkAuthorizationService {
     private readonly db;
     constructor(db: DataSource);
-    authorize(actor: PersonActor, workId: string, write?: boolean): Promise<import("./database/entities.js").Work>;
+    authorize(actor: PersonActor, workId: string, _write?: boolean): Promise<import("./database/entities.js").Work>;
 }
 export declare class PersonAuthController {
     private readonly auth;

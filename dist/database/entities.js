@@ -1163,6 +1163,8 @@ let Person = class Person {
     administratorSourceId;
     foremanSourceId;
     fullName;
+    email;
+    passwordHash;
     isActive;
     pinHash;
     pinLookupHmac;
@@ -1199,6 +1201,14 @@ __decorate([
     Column('varchar', { name: 'full_name', length: 201 }),
     __metadata("design:type", String)
 ], Person.prototype, "fullName", void 0);
+__decorate([
+    Column('varchar', { length: 320, nullable: true }),
+    __metadata("design:type", Object)
+], Person.prototype, "email", void 0);
+__decorate([
+    Column('varchar', { name: 'password_hash', length: 255, nullable: true, select: false }),
+    __metadata("design:type", Object)
+], Person.prototype, "passwordHash", void 0);
 __decorate([
     Column('boolean', { name: 'is_active', default: true }),
     __metadata("design:type", Boolean)
@@ -1299,6 +1309,8 @@ Person = __decorate([
     Unique('people_administrator_source_uq', ['administratorSourceId']),
     Unique('people_foreman_source_uq', ['foremanSourceId']),
     Check('people_name_not_blank', `length(btrim(full_name)) > 0`),
+    Check('people_credentials_complete', `(email IS NULL) = (password_hash IS NULL)`),
+    Check('people_email_not_blank', `email IS NULL OR length(btrim(email)) > 0`),
     Check('people_source_valid', `NOT (administrator_source_id IS NOT NULL AND foreman_source_id IS NOT NULL)`),
     Check('people_administrator_source_owner', `administrator_source_id IS NULL OR administrator_source_id = administrator_id`),
     Check('people_pin_credentials_complete', `(pin_hash IS NULL) = (pin_lookup_hmac IS NULL)`),
@@ -1307,6 +1319,7 @@ Person = __decorate([
     Check('people_session_version_valid', `session_version >= 0`),
     Check('people_failed_attempts_valid', `failed_attempts >= 0`),
     Index('people_administrator_active_idx', ['administratorId', 'isActive']),
+    Index('people_email_lower_uq', { synchronize: false }),
     Index('people_pin_lookup_hmac_uq', ['pinLookupHmac'], {
         unique: true,
         where: 'pin_lookup_hmac IS NOT NULL',

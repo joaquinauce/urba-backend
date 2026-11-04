@@ -14,18 +14,29 @@ import { BadRequestException, Body, ConflictException, Controller, Get, Inject, 
 import { hash } from 'bcryptjs';
 import { In, IsNull } from 'typeorm';
 import { DB } from './database.module.js';
-import { Person, PersonRole, Role, Work, WorkAssignment, } from './database/entities.js';
+import { Administrator, Person, PersonRole, Role, Work, WorkAssignment, } from './database/entities.js';
 import { JwtGuard } from './auth.js';
 import { PERSONAL_ROLES, codeLookupHmac, generatePersonalCode, } from './people-auth.js';
 import { required, uuid } from './shared.js';
 function validRoles(value) {
-    if (!Array.isArray(value) || !value.length)
-        throw new BadRequestException('Definí al menos un rol personal');
+    if (!Array.isArray(value) || value.length !== 1)
+        throw new BadRequestException('Elegí un único tipo de usuario');
     const roles = [...new Set(value)];
     if (roles.some((role) => typeof role !== 'string' ||
-        !PERSONAL_ROLES.includes(role)))
+        ![...PERSONAL_ROLES, 'ADMINISTRATOR'].includes(role)))
         throw new BadRequestException('Rol personal inválido');
     return roles;
+}
+function credentials(body, requiredForRole) {
+    const email = body.email === undefined || body.email === '' ? null : required(body.email, 'Email', 320).toLowerCase();
+    const password = body.password === undefined || body.password === '' ? null : body.password;
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+        throw new BadRequestException('Email inválido');
+    if (password !== null && (typeof password !== 'string' || password.length < 10))
+        throw new BadRequestException('La contraseña debe tener al menos 10 caracteres');
+    if (requiredForRole && !email)
+        throw new BadRequestException('Definí el email del usuario');
+    return { email, password };
 }
 function sessionAfter(current) {
     return String(BigInt(current) + 1n);
@@ -36,10 +47,10 @@ let PeopleAdminService = class PeopleAdminService {
         this.db = db;
     }
     async person(manager, administratorId, id) {
-        const person = await manager.getRepository(Person).findOneBy({
-            id,
-            administratorId,
-        });
+        const person = await manager.getRepository(Person).createQueryBuilder('person')
+            .addSelect('person.passwordHash')
+            .where('person.id = :id AND person.administratorId = :administratorId', { id, administratorId })
+            .getOne();
         if (!person || person.administratorSourceId)
             throw new NotFoundException('Persona no encontrada');
         return person;
@@ -49,6 +60,7 @@ let PeopleAdminService = class PeopleAdminService {
             .getRepository(Person)
             .createQueryBuilder('person')
             .addSelect('person.pinLookupHmac')
+            .addSelect('person.passwordHash')
             .where('person.administratorId = :administratorId', {
             administratorId,
         })
@@ -74,6 +86,8 @@ let PeopleAdminService = class PeopleAdminService {
             fullName: person.fullName,
             isActive: person.isActive,
             hasCode: person.pinLookupHmac !== null,
+            email: person.email,
+            hasPassword: person.passwordHash !== null,
             failedAttempts: person.failedAttempts,
             lockedUntil: person.lockedUntil,
             lastAccessAt: person.lastAccessAt,
@@ -86,7 +100,17 @@ let PeopleAdminService = class PeopleAdminService {
     async create(administratorId, body) {
         const fullName = required(body?.fullName, 'Nombre completo', 201);
         const roles = validRoles(body?.roles);
+        const needsLogin = roles.includes('SITE_MANAGER') || roles.includes('ADMINISTRATOR');
+        const login = credentials(body, needsLogin);
+        if (needsLogin && !login.password)
+            throw new BadRequestException('Definí la contraseña del usuario');
         return this.db.transaction(async (manager) => {
+            if (login.email && (await manager.getRepository(Administrator).createQueryBuilder('admin')
+                .where('LOWER(admin.email) = :email', { email: login.email }).getExists()))
+                throw new ConflictException('Ese email ya está en uso');
+            if (login.email && (await manager.getRepository(Person).createQueryBuilder('person')
+                .where('LOWER(person.email) = :email', { email: login.email }).getExists()))
+                throw new ConflictException('Ese email ya está en uso');
             const available = await manager
                 .getRepository(Role)
                 .countBy({ code: In(roles) });
@@ -96,6 +120,8 @@ let PeopleAdminService = class PeopleAdminService {
                 id: uuid(),
                 administratorId,
                 fullName,
+                email: login.email,
+                passwordHash: login.password ? await hash(login.password, 12) : null,
             });
             await manager.getRepository(Person).insert(person);
             await manager.getRepository(PersonRole).insert(roles.map((roleCode) => ({
@@ -103,18 +129,27 @@ let PeopleAdminService = class PeopleAdminService {
                 administratorId,
                 roleCode,
             })));
-            return { id: person.id, fullName, isActive: true, roles };
+            return { id: person.id, fullName, email: person.email, isActive: true, roles };
         });
     }
     async update(administratorId, id, body) {
         return this.db.transaction(async (manager) => {
             const person = await this.person(manager, administratorId, id);
             const roles = body.roles === undefined ? null : validRoles(body.roles);
+            const previousRoles = await manager.getRepository(PersonRole).findBy({ administratorId, personId: id });
+            const hadLoginRole = previousRoles.some((role) => role.roleCode === 'SITE_MANAGER' || role.roleCode === 'ADMINISTRATOR');
+            const login = credentials(body, false);
+            if (login.email && login.email !== person.email && (await manager.getRepository(Administrator).createQueryBuilder('admin')
+                .where('LOWER(admin.email) = :email', { email: login.email }).getExists()))
+                throw new ConflictException('Ese email ya está en uso');
+            if (login.email && login.email !== person.email && (await manager.getRepository(Person).createQueryBuilder('other')
+                .where('LOWER(other.email) = :email AND other.id <> :id', { email: login.email, id }).getExists()))
+                throw new ConflictException('Ese email ya está en uso');
             if (roles) {
                 const existing = await manager.getRepository(PersonRole).findBy({
                     administratorId,
                     personId: id,
-                    roleCode: In([...PERSONAL_ROLES]),
+                    roleCode: In([...PERSONAL_ROLES, 'ADMINISTRATOR']),
                 });
                 const removed = existing
                     .map((item) => item.roleCode)
@@ -144,6 +179,21 @@ let PeopleAdminService = class PeopleAdminService {
             }
             if (body.fullName !== undefined)
                 person.fullName = required(body.fullName, 'Nombre completo', 201);
+            const effectiveRoles = roles ?? (await manager.getRepository(PersonRole).findBy({ administratorId, personId: id })).map((role) => role.roleCode);
+            const needsLogin = effectiveRoles.includes('SITE_MANAGER') || effectiveRoles.includes('ADMINISTRATOR');
+            if (body.email !== undefined)
+                person.email = login.email;
+            if (login.password)
+                person.passwordHash = await hash(login.password, 12);
+            if (needsLogin && (!person.email || !person.passwordHash) &&
+                (body.email !== undefined || !!login.password || !hadLoginRole))
+                throw new BadRequestException('El usuario necesita email y contraseña');
+            if (!needsLogin) {
+                person.email = null;
+                person.passwordHash = null;
+            }
+            if (body.email !== undefined || login.password || roles)
+                person.sessionVersion = sessionAfter(person.sessionVersion);
             if (body.isActive !== undefined) {
                 if (typeof body.isActive !== 'boolean')
                     throw new BadRequestException('Estado inválido');
@@ -160,6 +210,7 @@ let PeopleAdminService = class PeopleAdminService {
             return {
                 id,
                 fullName: person.fullName,
+                email: person.email,
                 isActive: person.isActive,
                 roles: currentRoles.map((role) => role.roleCode),
             };
@@ -184,7 +235,7 @@ let PeopleAdminService = class PeopleAdminService {
                         .existsBy({
                         administratorId,
                         personId: id,
-                        roleCode: In([...PERSONAL_ROLES]),
+                        roleCode: 'FOREMAN',
                     });
                     if (!hasPersonalRole)
                         throw new BadRequestException('La persona no tiene un rol operativo');
@@ -230,7 +281,9 @@ let PeopleAdminService = class PeopleAdminService {
     }
     async assign(administratorId, workId, body) {
         const personId = required(body?.personId, 'Persona', 36);
-        const [roleCode] = validRoles([body?.roleCode]);
+        if (body?.roleCode !== 'SITE_MANAGER' && body?.roleCode !== 'FOREMAN')
+            throw new BadRequestException('Rol de obra inválido');
+        const roleCode = body.roleCode;
         const isPrimary = body?.isPrimary === true;
         try {
             return await this.db.transaction(async (manager) => {

@@ -14,7 +14,7 @@ import { Body, Controller, Injectable, Post, Get, UseGuards, UnauthorizedExcepti
 import { JwtService } from '@nestjs/jwt';
 import { compare } from 'bcryptjs';
 import { DB } from './database.module.js';
-import { Administrator } from './database/entities.js';
+import { Administrator, Person, PersonRole } from './database/entities.js';
 let AuthService = class AuthService {
     db;
     jwt;
@@ -48,8 +48,34 @@ let AuthService = class AuthService {
         })
             .andWhere('administrator.isActive = :active', { active: true })
             .getOne();
-        if (!admin || !(await compare(password, admin.passwordHash)))
-            throw new UnauthorizedException('Credenciales incorrectas');
+        if (!admin || !(await compare(password, admin.passwordHash))) {
+            const person = await this.db.getRepository(Person).createQueryBuilder('person')
+                .addSelect('person.passwordHash')
+                .where('LOWER(person.email) = LOWER(:email)', { email: email.trim() })
+                .andWhere('person.isActive = :active', { active: true }).getOne();
+            if (!person?.passwordHash || !(await compare(password, person.passwordHash)))
+                throw new UnauthorizedException('Credenciales incorrectas');
+            const roles = (await this.db.getRepository(PersonRole).findBy({
+                administratorId: person.administratorId, personId: person.id,
+            })).map((role) => role.roleCode);
+            if (roles.includes('ADMINISTRATOR')) {
+                this.attempts.delete(key);
+                return {
+                    accessToken: await this.jwt.signAsync({ type: 'administrator_person', sub: person.id,
+                        administratorId: person.administratorId, version: String(person.sessionVersion) }),
+                    administrator: { id: person.id, email: person.email, fullName: person.fullName, role: 'ADMINISTRATOR' },
+                };
+            }
+            if (!roles.includes('SITE_MANAGER'))
+                throw new UnauthorizedException('Credenciales incorrectas');
+            this.attempts.delete(key);
+            return {
+                accessToken: await this.jwt.signAsync({ type: 'person', sub: person.id,
+                    administratorId: person.administratorId, version: String(person.sessionVersion) }, { expiresIn: '8h' }),
+                person: { id: person.id, administratorId: person.administratorId,
+                    fullName: person.fullName, roles: roles.filter((role) => role === 'SITE_MANAGER' || role === 'FOREMAN') },
+            };
+        }
         this.attempts.delete(key);
         return {
             accessToken: await this.jwt.signAsync({
@@ -61,6 +87,7 @@ let AuthService = class AuthService {
                 id: admin.id,
                 email: admin.email,
                 fullName: admin.fullName,
+                role: 'ADMINISTRATOR',
             },
         };
     }
@@ -85,6 +112,19 @@ let JwtGuard = class JwtGuard {
             throw new UnauthorizedException();
         try {
             const payload = await this.jwt.verifyAsync(header.slice(7));
+            if (payload.type === 'administrator_person') {
+                const person = await this.db.getRepository(Person).findOneBy({ id: payload.sub,
+                    administratorId: payload.administratorId, isActive: true });
+                if (!person || String(person.sessionVersion) !== String(payload.version) || !person.email)
+                    throw new Error('inactive');
+                if (!(await this.db.getRepository(PersonRole).existsBy({
+                    personId: person.id, administratorId: person.administratorId, roleCode: 'ADMINISTRATOR',
+                })))
+                    throw new Error('role');
+                req.administratorId = person.administratorId;
+                req.administratorPersonId = person.id;
+                return true;
+            }
             if (payload.type && payload.type !== 'administrator')
                 throw new Error('profile');
             const active = await this.db
@@ -117,11 +157,18 @@ let AuthController = class AuthController {
         return this.auth.login(body.email, body.password, req.ip ?? 'unknown');
     }
     async me(req) {
+        if (req.administratorPersonId) {
+            const person = await this.db.getRepository(Person).findOne({
+                select: { id: true, email: true, fullName: true },
+                where: { id: req.administratorPersonId, administratorId: req.administratorId },
+            });
+            return person ? { ...person, role: 'ADMINISTRATOR' } : undefined;
+        }
         const administrator = await this.db.getRepository(Administrator).findOne({
             select: { id: true, email: true, fullName: true },
             where: { id: req.administratorId },
         });
-        return administrator ?? undefined;
+        return administrator ? { ...administrator, role: 'ADMINISTRATOR' } : undefined;
     }
 };
 __decorate([
