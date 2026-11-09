@@ -19,6 +19,7 @@ import {
   PeopleAdminService,
 } from './people-admin.js';
 import { MemberController, MemberService } from './member.js';
+import { AdminExpensesController, MemberExpensesController, ExpensesService } from './expenses.js';
 
 @Module({
   imports: [
@@ -46,6 +47,8 @@ import { MemberController, MemberService } from './member.js';
     PeopleAdminController,
     AssignmentAdminController,
     MemberController,
+    AdminExpensesController,
+    MemberExpensesController,
     PublicController,
     AliasController,
     ReportsController,
@@ -59,6 +62,7 @@ import { MemberController, MemberService } from './member.js';
     AdminService,
     PeopleAdminService,
     MemberService,
+    ExpensesService,
     PublicService,
     ReportsService,
   ],

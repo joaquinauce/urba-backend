@@ -20,6 +20,11 @@ ejecutan manualmente. TypeORM no ejecuta migraciones ni sincroniza el esquema.
 6. Comprobar la fila de conteos que devuelve cada script al final.
 7. Para la versión con login de jefes de obra y administradores adicionales,
    ejecutar `database/003_people_credentials.sql` después de preparar `people`.
+8. Para rendición de gastos, revisar y ejecutar manualmente
+   `20261109_001_expense_reports.sql` después de instalar el esquema de personas.
+   Crea tipos y rendiciones y precarga cuatro tipos por administrador. La API
+   precarga esos tipos al primer acceso de administradores creados después.
+   No modifica rendiciones existentes.
 
 No debe continuarse con otro script si PostgreSQL informa una excepción. El
 script usa una única transacción; cualquier precondición o control posterior

@@ -16,6 +16,7 @@ import { HealthController } from './health.js';
 import { PersonAuthController, PersonAuthService, PersonJwtGuard, WorkAuthorizationService, } from './people-auth.js';
 import { AssignmentAdminController, PeopleAdminController, PeopleAdminService, } from './people-admin.js';
 import { MemberController, MemberService } from './member.js';
+import { AdminExpensesController, MemberExpensesController, ExpensesService } from './expenses.js';
 let AppModule = class AppModule {
 };
 AppModule = __decorate([
@@ -43,6 +44,8 @@ AppModule = __decorate([
             PeopleAdminController,
             AssignmentAdminController,
             MemberController,
+            AdminExpensesController,
+            MemberExpensesController,
             PublicController,
             AliasController,
             ReportsController,
@@ -56,6 +59,7 @@ AppModule = __decorate([
             AdminService,
             PeopleAdminService,
             MemberService,
+            ExpensesService,
             PublicService,
             ReportsService,
         ],
