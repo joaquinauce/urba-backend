@@ -10,7 +10,7 @@ async function bootstrap() {
   app.use((req: {path:string}, res: {setHeader:(name:string,value:string)=>void}, next:()=>void) => {
     res.setHeader('X-Content-Type-Options','nosniff');
     res.setHeader('Referrer-Policy','no-referrer');
-    if (req.path.startsWith('/api/public/') || req.path.includes('/photos/')) res.setHeader('Cache-Control','no-store');
+    if (req.path.startsWith('/api/public/') || req.path.startsWith('/api/auth/') || req.path.includes('/photos/') || req.path.includes('/code/rotate')) res.setHeader('Cache-Control','no-store');
     next();
   });
   await app.listen(process.env.PORT ?? 3000);

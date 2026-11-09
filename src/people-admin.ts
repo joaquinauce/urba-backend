@@ -3,6 +3,7 @@ import {
   Body,
   ConflictException,
   Controller,
+  Logger,
   Get,
   Inject,
   Injectable,
@@ -32,6 +33,7 @@ import {
   type PersonalRole,
 } from './people-auth.js';
 import { required, uuid } from './shared.js';
+import { clearCodeLookupForManager, recordPersonalEvent } from './personal-security.js';
 
 type ManagedRole = PersonalRole | 'ADMINISTRATOR';
 function validRoles(value: unknown): ManagedRole[] {
@@ -65,6 +67,7 @@ function sessionAfter(current: string) {
 
 @Injectable()
 export class PeopleAdminService {
+  private readonly logger = new Logger(PeopleAdminService.name);
   constructor(@Inject(DB) private readonly db: DataSource) {}
 
   private async person(
@@ -75,6 +78,7 @@ export class PeopleAdminService {
     const person = await manager.getRepository(Person).createQueryBuilder('person')
       .addSelect('person.passwordHash')
       .where('person.id = :id AND person.administratorId = :administratorId', { id, administratorId })
+      .setLock('pessimistic_write')
       .getOne();
     if (!person || person.administratorSourceId)
       throw new NotFoundException('Persona no encontrada');
@@ -256,7 +260,7 @@ export class PeopleAdminService {
     });
   }
 
-  async rotateCode(administratorId: string, id: string) {
+  async rotateCode(administratorId: string, id: string, ip: string | null = null, actorPersonId: string | null = null) {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const code = await generatePersonalCode(this.db);
       const pinHash = await hash(code, 12);
@@ -278,7 +282,7 @@ export class PeopleAdminService {
             .existsBy({
               administratorId,
               personId: id,
-              roleCode: 'FOREMAN',
+              roleCode: In([...PERSONAL_ROLES]),
             });
           if (!hasPersonalRole)
             throw new BadRequestException(
@@ -291,6 +295,8 @@ export class PeopleAdminService {
           person.lockedUntil = null;
           person.updatedAt = new Date();
           await manager.getRepository(Person).save(person);
+          await recordPersonalEvent(manager, 'PIN_ROTATED', ip, id, administratorId, actorPersonId);
+          this.logger.log(JSON.stringify({ event: 'personal_access', result: 'PIN_ROTATED', ip, personId: id, administratorId, actorPersonId }));
           return { personId: id, code };
         });
       } catch (error) {
@@ -299,6 +305,23 @@ export class PeopleAdminService {
       }
     }
     throw new ConflictException('No se pudo generar un código único');
+  }
+
+  async unlock(administratorId: string, id: string, ip: string | null = null, actorPersonId: string | null = null) {
+    return this.db.transaction(async (manager) => {
+      const person = await this.person(manager, administratorId, id);
+      const lookup = await manager.getRepository(Person).createQueryBuilder('person')
+        .addSelect('person.pinLookupHmac')
+        .where('person.id = :id', { id }).getOne();
+      person.failedAttempts = 0;
+      person.lockedUntil = null;
+      person.updatedAt = new Date();
+      await manager.getRepository(Person).save(person);
+      if (lookup?.pinLookupHmac) await clearCodeLookupForManager(manager, lookup.pinLookupHmac);
+      await recordPersonalEvent(manager, 'UNLOCKED', ip, id, administratorId, actorPersonId);
+      this.logger.log(JSON.stringify({ event: 'personal_access', result: 'UNLOCKED', ip, personId: id, administratorId, actorPersonId }));
+      return { id, failedAttempts: 0, lockedUntil: null };
+    });
   }
 
   async assignments(administratorId: string, workId: string) {
@@ -442,7 +465,12 @@ export class PeopleAdminController {
 
   @Post(':id/code/rotate')
   rotate(@Req() request: AdminRequest, @Param('id') id: string) {
-    return this.people.rotateCode(request.administratorId, id);
+    return this.people.rotateCode(request.administratorId, id, request.ip ?? null, request.administratorPersonId ?? null);
+  }
+
+  @Post(':id/unlock')
+  unlock(@Req() request: AdminRequest, @Param('id') id: string) {
+    return this.people.unlock(request.administratorId, id, request.ip ?? null, request.administratorPersonId ?? null);
   }
 }
 

@@ -20,6 +20,7 @@ import {
 } from './people-admin.js';
 import { MemberController, MemberService } from './member.js';
 import { AdminExpensesController, MemberExpensesController, LegacyExpensesController, ExpensesService } from './expenses.js';
+import { PersonalSecurityService } from './personal-security.js';
 
 @Module({
   imports: [
@@ -58,6 +59,7 @@ import { AdminExpensesController, MemberExpensesController, LegacyExpensesContro
     AuthService,
     JwtGuard,
     PersonAuthService,
+    PersonalSecurityService,
     PersonJwtGuard,
     WorkAuthorizationService,
     AdminService,

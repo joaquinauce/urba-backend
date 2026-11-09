@@ -4,8 +4,6 @@ import {
   ExecutionContext,
   ForbiddenException,
   Get,
-  HttpException,
-  HttpStatus,
   Inject,
   Injectable,
   Post,
@@ -21,6 +19,7 @@ import type { Request } from 'express';
 import { In, IsNull, type DataSource, type EntityManager } from 'typeorm';
 import { DB } from './database.module.js';
 import { Person, PersonRole, WorkAssignment } from './database/entities.js';
+import { PersonalSecurityService } from './personal-security.js';
 
 export const PERSONAL_ROLES = ['SITE_MANAGER', 'FOREMAN'] as const;
 export type PersonalRole = (typeof PERSONAL_ROLES)[number];
@@ -64,41 +63,26 @@ export async function generatePersonalCode(db: DataSource | EntityManager) {
 
 @Injectable()
 export class PersonAuthService {
-  private readonly attempts = new Map<
-    string,
-    { count: number; until: number }
-  >();
-
   constructor(
     @Inject(DB) private readonly db: DataSource,
     private readonly jwt: JwtService,
+    private readonly security: PersonalSecurityService,
   ) {
     hmacSecret();
   }
 
-  private limit(ip: string) {
-    const now = Date.now();
-    const current = this.attempts.get(ip);
-    const next =
-      !current || current.until < now
-        ? { count: 1, until: now + 15 * 60_000 }
-        : { count: current.count + 1, until: current.until };
-    this.attempts.set(ip, next);
-    if (this.attempts.size > 10_000)
-      for (const [key, value] of this.attempts)
-        if (value.until < now) this.attempts.delete(key);
-    if (next.count > 12)
-      throw new HttpException(
-        'Demasiados intentos. Volvé a intentar más tarde.',
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
-  }
-
   async login(code: unknown, ip: string) {
-    this.limit(ip);
+    const safeCode = validPersonalCode(code) ? code : 'invalid';
+    try {
+      await this.security.reserve(safeCode, ip);
+    } catch (error) {
+      await this.security.event('LOGIN_BLOCKED', ip);
+      throw error;
+    }
     if (!validPersonalCode(code)) {
       await hash('000000', 12);
-      throw new UnauthorizedException('Código incorrecto');
+      await this.security.event('LOGIN_FAILED', ip);
+      throw new UnauthorizedException('No se pudo ingresar con ese código');
     }
     const lookup = codeLookupHmac(code);
     const result = await this.db.transaction(async (manager) => {
@@ -112,30 +96,28 @@ export class PersonAuthService {
         .getOne();
       if (!person) return { state: 'unknown' as const };
       const now = new Date();
-      if (!person.isActive)
-        return { state: 'denied' as const, person, locked: false };
-      if (person.lockedUntil && person.lockedUntil > now)
-        return { state: 'denied' as const, person, locked: true };
+      if (!person.isActive || (person.lockedUntil && person.lockedUntil > now))
+        return { state: 'denied' as const, person };
       const matches = !!person.pinHash && (await compare(code, person.pinHash));
       if (!matches) {
         person.failedAttempts += 1;
-        if (person.failedAttempts >= 5) {
-          person.lockedUntil = new Date(Date.now() + 15 * 60_000);
-          person.failedAttempts = 0;
+        if (person.failedAttempts % 5 === 0) {
+          const level = Math.min(Math.floor(person.failedAttempts / 5) - 1, 5);
+          person.lockedUntil = new Date(Date.now() + 15 * 60_000 * 2 ** level);
         }
         person.updatedAt = now;
         await manager.getRepository(Person).save(person);
-        return { state: 'denied' as const, person, locked: false };
+        return { state: 'denied' as const, person, newlyBlocked: person.failedAttempts % 5 === 0 };
       }
       const roles = (
         await manager.getRepository(PersonRole).findBy({
           personId: person.id,
           administratorId: person.administratorId,
-          roleCode: 'FOREMAN',
+          roleCode: In([...PERSONAL_ROLES]),
         })
       ).map((role) => role.roleCode as PersonalRole);
       if (!roles.length)
-        return { state: 'denied' as const, person, locked: false };
+        return { state: 'denied' as const, person };
       person.failedAttempts = 0;
       person.lockedUntil = null;
       person.lastAccessAt = now;
@@ -145,13 +127,16 @@ export class PersonAuthService {
     });
     if (result.state === 'unknown') {
       await hash(code, 12);
-      throw new UnauthorizedException('Código incorrecto');
+      await this.security.event('LOGIN_FAILED', ip);
+      throw new UnauthorizedException('No se pudo ingresar con ese código');
     }
-    if (result.state !== 'ok')
-      throw new UnauthorizedException(
-        result.locked ? 'Acceso temporalmente bloqueado' : 'Código incorrecto',
-      );
-    this.attempts.delete(ip);
+    if (result.state !== 'ok') {
+      await hash('000000', 12);
+      await this.security.event('newlyBlocked' in result && result.newlyBlocked ? 'LOGIN_BLOCKED' : 'LOGIN_FAILED', ip, result.person.id, result.person.administratorId);
+      throw new UnauthorizedException('No se pudo ingresar con ese código');
+    }
+    await this.security.clearCode(code);
+    await this.security.event('LOGIN_SUCCESS', ip, result.person.id, result.person.administratorId);
     return {
       accessToken: await this.jwt.signAsync(
         {

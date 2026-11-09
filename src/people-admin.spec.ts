@@ -23,7 +23,7 @@ describe('edición de personas', () => {
       isActive: true, sessionVersion: '0' };
     const manager = { getRepository: (entity: unknown) => {
       if (entity === Person) return { createQueryBuilder: () => ({
-        addSelect() { return this; }, where() { return this; }, getOne: async () => person,
+        addSelect() { return this; }, where() { return this; }, setLock() { return this; }, getOne: async () => person,
       }), save: async () => person };
       if (entity === PersonRole) return { findBy: async () => [{ roleCode: 'SITE_MANAGER' }] };
       throw new Error('Repositorio inesperado');
@@ -43,7 +43,7 @@ describe('edición de personas', () => {
     const manager = { getRepository: (entity: unknown) => {
       if (entity === Person) return {
         createQueryBuilder: () => ({
-          addSelect() { return this; }, where() { return this; },
+          addSelect() { return this; }, where() { return this; }, setLock() { return this; },
           getOne: async () => person,
         }), save,
       };

@@ -41,6 +41,7 @@ import {
   type PersonRequest,
 } from './people-auth.js';
 import { MemberService } from './member.js';
+import { PersonalSecurityService } from './personal-security.js';
 
 const ADMIN_1 = randomUUID();
 const ADMIN_2 = randomUUID();
@@ -398,7 +399,7 @@ integration('PostgreSQL aislado: escrituras y concurrencia', () => {
     jwt = new JwtService({ secret: process.env.JWT_SECRET });
     const authorization = new WorkAuthorizationService(db);
     people = new PeopleAdminService(db);
-    personAuth = new PersonAuthService(db, jwt);
+    personAuth = new PersonAuthService(db, jwt, new PersonalSecurityService(db));
     personGuard = new PersonJwtGuard(jwt, db);
     members = new MemberService(db, authorization, admin, reports);
   });
