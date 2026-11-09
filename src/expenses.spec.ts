@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ForbiddenException } from '@nestjs/common';
 import { ExpensesService } from './expenses.js';
+import sharp from 'sharp';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const actor = { kind: 'person' as const, id: '11111111-1111-4111-8111-111111111111', administratorId: '22222222-2222-4222-8222-222222222222', fullName: 'Capataz', roles: ['FOREMAN' as const] };
 const workId = '33333333-3333-4333-8333-333333333333';
@@ -24,5 +28,33 @@ describe('rendiciones', () => {
     await expect(service.create(request, workId, { amount: '100', typeId, requestId }, file)).rejects.toBeInstanceOf(ForbiddenException);
     await expect(service.recent(request, workId)).rejects.toBeInstanceOf(ForbiddenException);
     expect(query).not.toHaveBeenCalled();
+  });
+
+  it('atribuye el gasto con alias al capataz responsable de la obra', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'urba-expense-'));
+    const previous = process.env.PHOTO_STORAGE_DIR;
+    process.env.PHOTO_STORAGE_DIR = dir;
+    const foremanId = '66666666-6666-4666-8666-666666666666';
+    const query = vi.fn(async (sql: string, params: unknown[]) => {
+      if (sql.startsWith('SELECT id FROM expense_reports')) return [];
+      if (sql.startsWith('SELECT name FROM expense_types')) return [{ name: 'Comida' }];
+      if (sql.startsWith('INSERT INTO expense_reports')) {
+        expect(params[3]).toBeNull();
+        expect(params[4]).toBe(foremanId);
+        expect(params[13]).toBe('Capataz responsable');
+        return [{ id: params[0] }];
+      }
+      throw new Error('Consulta inesperada');
+    });
+    try {
+      const image = await sharp({ create: { width: 2, height: 2, channels: 3, background: '#ffffff' } }).png().toBuffer();
+      const service = new ExpensesService({ query } as never, { authorize: vi.fn() } as never);
+      const result = await service.createLegacy({ id: workId, administratorId: actor.administratorId, foremanId, foremanName: 'Capataz responsable', status: 'ACTIVA', timeZone: 'America/Argentina/Cordoba' } as never, { amount: '100', typeId, requestId }, { buffer: image, size: image.length } as Express.Multer.File);
+      expect(result.id).toMatch(/^[0-9a-f-]{36}$/);
+    } finally {
+      if (previous === undefined) delete process.env.PHOTO_STORAGE_DIR;
+      else process.env.PHOTO_STORAGE_DIR = previous;
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -894,6 +894,7 @@ export class AdminService {
     materializeRecurrences = true,
   ) {
     const work = await this.work(adminId, workId);
+    const primaryForeman = await this.db.getRepository(Foreman).findOneBy({ id: work.foremanId, administratorId: adminId });
     const { date: today, time: todayTime } = localNow(work.timeZone);
     if (materializeRecurrences) await this.materializeAll(adminId, workId);
     const [
@@ -1039,6 +1040,7 @@ export class AdminService {
         estimatedEndDate: work.estimatedEndDate,
         status: work.status,
         foremanId: work.foremanId,
+        foremanName: primaryForeman ? `${primaryForeman.firstName} ${primaryForeman.lastName}` : '',
         timeZone: work.timeZone,
         closeTime: work.closeTime,
         accessAlias: work.accessAlias,

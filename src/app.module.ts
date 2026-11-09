@@ -19,7 +19,7 @@ import {
   PeopleAdminService,
 } from './people-admin.js';
 import { MemberController, MemberService } from './member.js';
-import { AdminExpensesController, MemberExpensesController, ExpensesService } from './expenses.js';
+import { AdminExpensesController, MemberExpensesController, LegacyExpensesController, ExpensesService } from './expenses.js';
 
 @Module({
   imports: [
@@ -49,6 +49,7 @@ import { AdminExpensesController, MemberExpensesController, ExpensesService } fr
     MemberController,
     AdminExpensesController,
     MemberExpensesController,
+    LegacyExpensesController,
     PublicController,
     AliasController,
     ReportsController,
