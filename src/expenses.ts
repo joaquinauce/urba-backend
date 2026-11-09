@@ -13,6 +13,7 @@ import { PublicService } from './public.js';
 import type { Work } from './database/entities.js';
 
 const storageDir = () => resolve(process.env.PHOTO_STORAGE_DIR ?? './storage/photos');
+const receiptUploadLimit = 25 * 1024 * 1024;
 const uuid = (value: unknown) => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 const date = (value: unknown) => {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -96,7 +97,7 @@ export class ExpensesService {
     if (!uuid(body?.typeId) || !uuid(body?.requestId)) throw new BadRequestException('Datos del gasto inválidos');
     const amount = Number(body.amount);
     if (!Number.isFinite(amount) || amount <= 0 || amount > 999999999999.99 || !/^\d+(\.\d{1,2})?$/.test(String(body.amount))) throw new BadRequestException('Ingresá un monto positivo con hasta dos decimales');
-    if (!file?.buffer?.length || file.size > 12 * 1024 * 1024) throw new BadRequestException('Adjuntá una fotografía de hasta 12 MB');
+    if (!file?.buffer?.length || file.size > receiptUploadLimit) throw new BadRequestException('Adjuntá una fotografía de hasta 25 MB');
     return amount;
   }
 
@@ -110,7 +111,7 @@ export class ExpensesService {
     if (!types.length) throw new BadRequestException('Seleccioná un tipo de gasto habilitado');
     let result: { data: Buffer; info: { width: number; height: number } };
     try {
-      result = await sharp(file.buffer, { limitInputPixels: 30_000_000 }).rotate().resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true }).webp({ quality: 78 }).toBuffer({ resolveWithObject: true });
+      result = await sharp(file.buffer, { limitInputPixels: 30_000_000 }).rotate().resize({ width: 2200, height: 2200, fit: 'inside', withoutEnlargement: true }).webp({ quality: 85 }).toBuffer({ resolveWithObject: true });
     } catch { throw new BadRequestException('Formato de imagen inválido'); }
     const dir = storageDir();
     await mkdir(dir, { recursive: true });
@@ -166,7 +167,7 @@ export class MemberExpensesController {
   @Get('types') types(@Req() req: PersonRequest) { return this.expenses.types(req.actor.administratorId, true); }
   @Get('works/:workId') recent(@Req() req: PersonRequest, @Param('workId') workId: string) { return this.expenses.recent(req, workId); }
   @Post('works/:workId')
-  @UseInterceptors(FileInterceptor('photo', { limits: { fileSize: 12 * 1024 * 1024 } }))
+  @UseInterceptors(FileInterceptor('photo', { limits: { fileSize: receiptUploadLimit } }))
   create(@Req() req: PersonRequest, @Param('workId') workId: string, @Body() body: { amount?: unknown; typeId?: unknown; requestId?: unknown }, @UploadedFile() file: Express.Multer.File) { return this.expenses.create(req, workId, body, file); }
   @Get(':id/receipt') async photo(@Req() req: PersonRequest, @Param('id') id: string, @Res() res: Response) { res.type('image/webp').send(await this.expenses.photo(req.actor.administratorId, id, req.actor.id)); }
 }
@@ -182,7 +183,7 @@ export class LegacyExpensesController {
     return this.expenses.recentLegacy(await this.publicService.session(req));
   }
   @Post()
-  @UseInterceptors(FileInterceptor('photo', { limits: { fileSize: 12 * 1024 * 1024 } }))
+  @UseInterceptors(FileInterceptor('photo', { limits: { fileSize: receiptUploadLimit } }))
   async create(@Req() req: Request, @Body() body: { amount?: unknown; typeId?: unknown; requestId?: unknown }, @UploadedFile() file: Express.Multer.File) {
     return this.expenses.createLegacy(await this.publicService.session(req), body, file);
   }
