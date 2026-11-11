@@ -48,6 +48,7 @@ function setup() {
   const savedReports: DailyReport[] = [];
   const reportRepository = {
     findOneBy: vi.fn(async () => null),
+    existsBy: vi.fn(async () => false),
     create: vi.fn((value) => Object.assign(new DailyReport(), value)),
     save: vi.fn(async (value: DailyReport) => {
       savedReports.push(value);
@@ -190,5 +191,55 @@ describe('envío diario', () => {
     ).rejects.toThrow('Informá todos');
     expect(savedItems).toHaveLength(0);
     expect(savedReports).toHaveLength(0);
+  });
+});
+
+describe('informe de avance de objetivos diarios', () => {
+  it('usa las rendiciones históricas y calcula el porcentaje de cada objetivo', async () => {
+    const report = Object.assign(new DailyReport(), {
+      id: 'report-1', workId: 'work-1', workDate: '2026-11-09', foremanId: 'foreman-1',
+      work: Object.assign(new Work(), { name: 'Obra Norte' }),
+      foreman: Object.assign(new Foreman(), { firstName: 'Ana', lastName: 'Pérez' }),
+    });
+    const reportFind = vi.fn(async () => [report]);
+    const itemFind = vi.fn(async () => [Object.assign(new DailyReportItem(), {
+      id: 'item-1', reportId: 'report-1', descriptionSnapshot: 'Colocar postes',
+      expectedQuantitySnapshot: '20', actualQuantity: '15', unitSnapshot: 'UNIDADES',
+    })]);
+    const db = { getRepository: (entity: unknown) => entity === DailyReport ? { find: reportFind } : { find: itemFind } } as unknown as DataSource;
+    const service = new ReportsService(db, {} as never);
+    const result = await service.dailyGoals('admin', '2026-11-01', '2026-11-10', 'work-1', 'foreman-1');
+    expect(reportFind).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ administratorId: 'admin', workId: 'work-1', foremanId: 'foreman-1' }) }));
+    expect(result[0]).toMatchObject({ date: '2026-11-09', workName: 'Obra Norte', foremanName: 'Ana Pérez', compliance: 75, items: [{ description: 'Colocar postes', expected: 20, actual: 15, percentage: 75 }] });
+    expect(itemFind).toHaveBeenCalledOnce();
+  });
+});
+
+describe('carga administrativa de informes vencidos', () => {
+  it('guarda el informe histórico con atribución administrativa', async () => {
+    const { service, savedReports, savedItems } = setup();
+    const result = await service.submit(work, {
+      observations: 'Carga de día vencido',
+      items: [
+        { goalId: 'goal-1', actualQuantity: 4 },
+        { goalId: 'goal-2', actualQuantity: 8 },
+      ],
+    }, undefined, '2026-11-09');
+    expect(result.id).toBe('report');
+    expect(savedReports[0].administrativeEntry).toBe(true);
+    expect(savedItems).toHaveLength(2);
+  });
+
+  it('acepta una fecha anterior y la envía por el mismo circuito de objetivos', async () => {
+    const today = localNow('America/Argentina/Cordoba').date;
+    const yesterday = new Date(Date.parse(`${today}T12:00:00Z`) - 86400000).toISOString().slice(0, 10);
+    const work = Object.assign(new Work(), { id: 'work-1', administratorId: 'admin', startDate: yesterday, timeZone: 'America/Argentina/Cordoba', closeTime: '19:00' });
+    const service = new ReportsService({} as DataSource, { work: vi.fn(async () => work) } as never);
+    const submit = vi.spyOn(service, 'submit').mockResolvedValue({ id: 'report-1' } as never);
+    const body = { items: [{ goalId: 'goal-1', actualQuantity: 4 }] };
+    await expect(service.submitMissing('admin', 'work-1', yesterday, body)).resolves.toEqual({ id: 'report-1' });
+    expect(submit).toHaveBeenCalledWith(work, body, undefined, yesterday);
+    const tomorrow = new Date(Date.parse(`${today}T12:00:00Z`) + 86400000).toISOString().slice(0, 10);
+    await expect(service.submitMissing('admin', 'work-1', tomorrow, body)).rejects.toThrow();
   });
 });

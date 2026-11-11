@@ -15,7 +15,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { In, type DataSource } from 'typeorm';
+import { In, IsNull, type DataSource } from 'typeorm';
 import QRCode from 'qrcode';
 import { hash } from 'bcryptjs';
 import { DB } from './database.module.js';
@@ -170,6 +170,7 @@ export class AdminService {
       .addSelect('work.startDate', 'startDate')
       .addSelect('work.estimatedEndDate', 'estimatedEndDate')
       .addSelect('work.status', 'status')
+      .addSelect('work.pauseReason', 'pauseReason')
       .addSelect('work.timeZone', 'timeZone')
       .addSelect('work.closeTime', 'closeTime')
       .addSelect('work.foremanId', 'foremanId')
@@ -190,6 +191,97 @@ export class AdminService {
     if (!work) throw new NotFoundException('Recurso no encontrado');
     return work;
   }
+  private async foremanPerson(tx: Db, adminId: string, foremanId: string) {
+    const foreman = await tx.getRepository(Foreman).findOneBy({ administratorId: adminId, id: foremanId });
+    if (!foreman) throw new NotFoundException('Capataz no encontrado');
+    const people = tx.getRepository(Person);
+    let person = await people.findOneBy({ administratorId: adminId, foremanSourceId: foremanId });
+    if (!person) {
+      person = people.create({ id: uuid(), administratorId: adminId, foremanSourceId: foremanId, fullName: `${foreman.firstName} ${foreman.lastName}` });
+      await people.insert(person);
+    }
+    const roles = tx.getRepository(PersonRole);
+    if (!await roles.existsBy({ administratorId: adminId, personId: person.id, roleCode: 'FOREMAN' }))
+      await roles.insert({ administratorId: adminId, personId: person.id, roleCode: 'FOREMAN' });
+    return person;
+  }
+  private async syncPrimaryForemanAssignment(tx: Db, adminId: string, id: string, foremanId: string, previousForemanId?: string, previousAssignedAt?: Date) {
+    const assignments = tx.getRepository(WorkAssignment);
+    const primary = await assignments.find({ where: { administratorId: adminId, workId: id, roleCode: 'FOREMAN', isPrimary: true, unassignedAt: IsNull() } });
+    const now = new Date();
+    if (previousForemanId && !primary.length) {
+      const previousPerson = await this.foremanPerson(tx, adminId, previousForemanId);
+      await assignments.insert({ id: uuid(), administratorId: adminId, workId: id, personId: previousPerson.id, roleCode: 'FOREMAN', isPrimary: false, assignedAt: previousAssignedAt ?? now, unassignedAt: now });
+    }
+    for (const assignment of primary) {
+      assignment.unassignedAt = now;
+      assignment.isPrimary = false;
+      assignment.updatedAt = now;
+      await assignments.save(assignment);
+    }
+    const person = await this.foremanPerson(tx, adminId, foremanId);
+    const existing = await assignments.findOneBy({ administratorId: adminId, workId: id, personId: person.id, roleCode: 'FOREMAN', unassignedAt: IsNull() });
+    if (existing) {
+      existing.isPrimary = true;
+      existing.updatedAt = now;
+      await assignments.save(existing);
+    } else {
+      await assignments.insert({ id: uuid(), administratorId: adminId, workId: id, personId: person.id, roleCode: 'FOREMAN', isPrimary: true });
+    }
+  }
+  async changeWorkForeman(adminId: string, id: string, foremanId: unknown) {
+    if (typeof foremanId !== 'string' || !foremanId)
+      throw new BadRequestException('Seleccioná un capataz');
+    return this.db.transaction(async (tx) => {
+      const work = await tx.getRepository(Work).createQueryBuilder('work')
+        .where('work.administratorId = :adminId AND work.id = :id', { adminId, id })
+        .setLock('pessimistic_write').getOne();
+      if (!work) throw new NotFoundException('Obra no encontrada');
+      const foreman = await tx.getRepository(Foreman).findOneBy({ id: foremanId, administratorId: adminId, isActive: true });
+      if (!foreman) throw new BadRequestException('Capataz no disponible');
+      if (work.foremanId === foremanId) return { id, foremanId, foremanName: `${foreman.firstName} ${foreman.lastName}` };
+
+      await this.syncPrimaryForemanAssignment(tx, adminId, id, foremanId, work.foremanId, work.createdAt);
+      work.foremanId = foremanId;
+      work.updatedAt = new Date();
+      await tx.getRepository(Work).save(work);
+      return { id, foremanId, foremanName: `${foreman.firstName} ${foreman.lastName}` };
+    });
+  }
+  async pauseWork(adminId: string, id: string, reason: unknown) {
+    const pauseReason = required(reason, 'Motivo de pausa', 1000);
+    return this.db.transaction(async (tx) => {
+      const work = await tx.getRepository(Work).createQueryBuilder('work')
+        .where('work.administratorId = :adminId AND work.id = :id', { adminId, id })
+        .setLock('pessimistic_write').getOne();
+      if (!work) throw new NotFoundException('Recurso no encontrado');
+      if (work.status !== 'ACTIVA' || work.estimatedEndDate < localNow(work.timeZone).date)
+        throw new BadRequestException('Solo se puede pausar una obra activa');
+      work.status = 'PAUSADA';
+      work.pauseReason = pauseReason;
+      work.updatedAt = new Date();
+      await tx.getRepository(Work).save(work);
+      return { id: work.id, status: work.status, pauseReason: work.pauseReason };
+    });
+  }
+  async resumeWork(adminId: string, id: string, estimatedEndDate: unknown) {
+    const end = validDate(estimatedEndDate as string);
+    return this.db.transaction(async (tx) => {
+      const work = await tx.getRepository(Work).createQueryBuilder('work')
+        .where('work.administratorId = :adminId AND work.id = :id', { adminId, id })
+        .setLock('pessimistic_write').getOne();
+      if (!work) throw new NotFoundException('Recurso no encontrado');
+      if (work.status !== 'PAUSADA') throw new BadRequestException('La obra no está pausada');
+      if (end < work.startDate || end < localNow(work.timeZone).date)
+        throw new BadRequestException('La nueva finalización debe ser hoy o una fecha posterior');
+      work.status = 'ACTIVA';
+      work.pauseReason = null;
+      work.estimatedEndDate = end;
+      work.updatedAt = new Date();
+      await tx.getRepository(Work).save(work);
+      return { id: work.id, status: work.status, estimatedEndDate: work.estimatedEndDate };
+    });
+  }
   async saveWork(adminId: string, body: any, id?: string) {
     const name = required(body.name, 'Nombre de obra', 180);
     const description = optional(body.description);
@@ -205,10 +297,9 @@ export class AdminService {
       id: body.foremanId,
       isActive: true,
     });
-    if (!foremanExists) throw new NotFoundException('Recurso no encontrado');
-    const status = body.status ?? 'ACTIVA';
-    if (!['ACTIVA', 'PAUSADA', 'FINALIZADA'].includes(status))
-      throw new BadRequestException('Estado inválido');
+    if (!foremanExists && (!id || (await this.work(adminId, id)).foremanId !== body.foremanId))
+      throw new NotFoundException('Recurso no encontrado');
+    const status = 'ACTIVA';
     const timeZone = body.timeZone ?? 'America/Argentina/Cordoba';
     localNow(timeZone);
     const closeTime = body.closeTime ?? '19:00';
@@ -226,6 +317,7 @@ export class AdminService {
         })
         .getOne();
       if (!previous) throw new NotFoundException('Recurso no encontrado');
+      const previousForemanId = previous.foremanId;
       const effectiveAlias =
         body.accessAlias === undefined ? previous.accessAlias : alias;
       const pinChanged = body.aliasPin !== undefined && body.aliasPin !== '';
@@ -244,7 +336,7 @@ export class AdminService {
         location,
         startDate: start,
         estimatedEndDate: end,
-        status,
+        status: previous.status,
         timeZone,
         closeTime,
         accessAlias: effectiveAlias,
@@ -255,7 +347,38 @@ export class AdminService {
         updatedAt: new Date(),
       });
       try {
-        const saved = await repository.save(previous);
+        const saved = await this.db.transaction(async tx => {
+          if (body.siteManagerId !== undefined) {
+            if (typeof body.siteManagerId !== 'string' || !body.siteManagerId)
+              throw new BadRequestException('Jefe de obra inválido');
+            const assignments = await tx.getRepository(WorkAssignment).find({
+              where: { administratorId: adminId, workId: id, roleCode: 'SITE_MANAGER', unassignedAt: IsNull() },
+            });
+            const keep = assignments.find(assignment => assignment.personId === body.siteManagerId);
+            if (body.siteManagerId && !keep) {
+              const person = await tx.getRepository(Person).findOneBy({ id: body.siteManagerId, administratorId: adminId, isActive: true });
+              const role = await tx.getRepository(PersonRole).findOneBy({ personId: body.siteManagerId, administratorId: adminId, roleCode: 'SITE_MANAGER' });
+              if (!person || !role) throw new BadRequestException('Jefe de obra no disponible');
+            }
+            for (const assignment of assignments) {
+              if (assignment === keep) continue;
+              assignment.unassignedAt = new Date();
+              assignment.updatedAt = assignment.unassignedAt;
+              await tx.getRepository(WorkAssignment).save(assignment);
+            }
+            if (body.siteManagerId && !keep) await tx.getRepository(WorkAssignment).insert({
+              id: uuid(), administratorId: adminId, workId: id, personId: body.siteManagerId,
+              roleCode: 'SITE_MANAGER', isPrimary: false,
+            });
+          } else if (!await tx.getRepository(WorkAssignment).countBy({
+            administratorId: adminId, workId: id, roleCode: 'SITE_MANAGER', unassignedAt: IsNull(),
+          })) {
+            throw new BadRequestException('La obra debe conservar un jefe de obra');
+          }
+          if (previousForemanId !== body.foremanId)
+            await this.syncPrimaryForemanAssignment(tx, adminId, id, body.foremanId, previousForemanId, previous.createdAt);
+          return tx.getRepository(Work).save(previous);
+        });
         return {
           id: saved.id,
           name: saved.name,
@@ -277,6 +400,8 @@ export class AdminService {
       throw new BadRequestException('Responsables inválidos');
     const keys = assignments.map((assignment) => `${assignment.personId}:${assignment.roleCode}`);
     if (new Set(keys).size !== keys.length) throw new BadRequestException('Responsables repetidos');
+    if (assignments.filter(assignment => assignment.roleCode === 'SITE_MANAGER').length !== 1)
+      throw new BadRequestException('Seleccioná un jefe de obra');
     const pinHash = alias ? await hash(validPin(body.aliasPin), 12) : null;
     const accessCode = code();
     const workId = uuid();
@@ -287,7 +412,7 @@ export class AdminService {
           const role = await manager.getRepository(PersonRole).findOneBy({ personId: assignment.personId, administratorId: adminId, roleCode: assignment.roleCode });
           if (!person || !role) throw new BadRequestException('Responsable no disponible para ese rol');
         }
-        await manager.getRepository(Work).save(manager.getRepository(Work).create({
+        const savedWork = await manager.getRepository(Work).save(manager.getRepository(Work).create({
           id: workId,
           administratorId: adminId,
           foremanId: body.foremanId,
@@ -307,6 +432,7 @@ export class AdminService {
           id: uuid(), administratorId: adminId, workId, personId: assignment.personId,
           roleCode: assignment.roleCode, isPrimary: false,
         })));
+        await this.syncPrimaryForemanAssignment(manager, adminId, workId, body.foremanId, undefined, savedWork.createdAt);
       });
     } catch (error) {
       if ((error as { code?: string }).code === '23505')
@@ -941,8 +1067,9 @@ export class AdminService {
       quantityDecimals: goal.quantityDecimals,
     }));
     const reports = reportEntities.map((report) => {
-      const responsibleName =
-        report.submittedByPerson?.fullName ?? report.foremanNameSnapshot;
+      const responsibleName = report.administrativeEntry
+        ? 'Administración'
+        : report.submittedByPerson?.fullName ?? report.foremanNameSnapshot;
       return {
         id: report.id,
         date: report.workDate,
@@ -951,7 +1078,7 @@ export class AdminService {
         submittedBy: {
           personId: report.submittedByPersonId,
           name: responsibleName,
-          accessType: report.submittedByPersonId ? 'PERSONAL' : 'LEGACY',
+          accessType: report.administrativeEntry ? 'ADMIN' : report.submittedByPersonId ? 'PERSONAL' : 'LEGACY',
         },
         observations: report.observations,
         submittedAt: report.submittedAt,
@@ -1085,6 +1212,27 @@ export class AdminController {
     @Body() body: any,
   ) {
     return this.service.saveWork(req.administratorId, body, id);
+  }
+  @Patch('works/:id/foreman') changeWorkForeman(
+    @Req() req: AdminRequest,
+    @Param('id') id: string,
+    @Body() body: { foremanId?: string },
+  ) {
+    return this.service.changeWorkForeman(req.administratorId, id, body?.foremanId);
+  }
+  @Post('works/:id/pause') pauseWork(
+    @Req() req: AdminRequest,
+    @Param('id') id: string,
+    @Body() body: { reason?: string },
+  ) {
+    return this.service.pauseWork(req.administratorId, id, body?.reason);
+  }
+  @Post('works/:id/resume') resumeWork(
+    @Req() req: AdminRequest,
+    @Param('id') id: string,
+    @Body() body: { estimatedEndDate?: string },
+  ) {
+    return this.service.resumeWork(req.administratorId, id, body?.estimatedEndDate);
   }
   @Post('works/:id/rotate-code') rotateCode(
     @Req() req: AdminRequest,

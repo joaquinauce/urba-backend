@@ -9,6 +9,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Req,
   Res,
   UploadedFile,
@@ -16,6 +17,7 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { Between, In } from 'typeorm';
 import type { Response } from 'express';
 import type { DataSource } from 'typeorm';
 import sharp from 'sharp';
@@ -41,6 +43,7 @@ import {
   optional,
   quantityForUnit,
   reportSummary,
+  validDate,
   uuid,
   type Db,
 } from './shared.js';
@@ -62,10 +65,64 @@ export class ReportsService {
       throw new BadRequestException('El día está cerrado para informar');
     return local.date;
   }
-  async submit(work: Work, body: Submission, submittedByPersonId?: string) {
+  async dailyGoals(adminId: string, from: string, to: string, workId?: string, foremanId?: string) {
+    if (from > to) throw new BadRequestException('La fecha desde debe ser anterior a la fecha hasta');
+    const reports = await this.db.getRepository(DailyReport).find({
+      where: {
+        administratorId: adminId,
+        workDate: Between(from, to),
+        ...(workId ? { workId } : {}),
+        ...(foremanId ? { foremanId } : {}),
+      },
+      relations: { work: true, foreman: true },
+      order: { workDate: 'DESC', createdAt: 'DESC' },
+    });
+    if (!reports.length) return [];
+    const items = await this.db.getRepository(DailyReportItem).find({
+      where: { administratorId: adminId, reportId: In(reports.map(report => report.id)) },
+      order: { createdAt: 'ASC', id: 'ASC' },
+    });
+    const byReport = new Map<string, DailyReportItem[]>();
+    for (const item of items) {
+      const list = byReport.get(item.reportId) ?? [];
+      list.push(item);
+      byReport.set(item.reportId, list);
+    }
+    return reports.map(report => ({
+      reportId: report.id,
+      date: report.workDate,
+      workId: report.workId,
+      workName: report.work.name,
+      foremanId: report.foremanId,
+      foremanName: `${report.foreman.firstName} ${report.foreman.lastName}`,
+      compliance: reportSummary((byReport.get(report.id) ?? []).map(item => ({
+        actual_quantity: item.actualQuantity,
+        expected_quantity_snapshot: item.expectedQuantitySnapshot,
+      }))),
+      items: (byReport.get(report.id) ?? []).map(item => ({
+        id: item.id,
+        description: item.descriptionSnapshot,
+        expected: Number(item.expectedQuantitySnapshot),
+        actual: Number(item.actualQuantity),
+        unit: item.unitSnapshot,
+        customUnit: item.customUnitSnapshot,
+        quantityStep: item.quantityStepSnapshot,
+        quantityDecimals: item.quantityDecimalsSnapshot,
+        percentage: Math.round(Number(item.actualQuantity) / Number(item.expectedQuantitySnapshot) * 100),
+      })),
+    }));
+  }
+  async submitMissing(adminId: string, workId: string, date: string, body: Submission) {
+    const work = await this.admin.work(adminId, workId);
+    const today = localNow(work.timeZone);
+    if (date < work.startDate || date > today.date || (date === today.date && today.time < work.closeTime.slice(0, 5)))
+      throw new BadRequestException('La fecha todavía no está vencida');
+    return this.submit(work, body, undefined, date);
+  }
+  async submit(work: Work, body: Submission, submittedByPersonId?: string, historicalDate?: string) {
     if (!Array.isArray(body?.items))
       throw new BadRequestException('Faltan las cantidades');
-    const date = this.editable(work);
+    const date = historicalDate ?? this.editable(work);
     return this.db.transaction(async (tx) => {
       const current = await tx
         .getRepository(Work)
@@ -74,8 +131,10 @@ export class ReportsService {
         .setLock('pessimistic_write')
         .getOne();
       if (!current) throw new NotFoundException('Recurso no encontrado');
-      if (this.editable(current) !== date)
+      if (!historicalDate && this.editable(current) !== date)
         throw new BadRequestException('El día está cerrado para informar');
+      if (historicalDate && await tx.getRepository(DailyReport).existsBy({ administratorId: work.administratorId, workId: work.id, workDate: date }))
+        throw new BadRequestException('Ese día ya tiene un informe');
       await this.admin.materialize(work.administratorId, work.id, date, tx);
       const goals = await tx.getRepository(DailyGoal).find({
         where: { workId: work.id, workDate: date, isActive: true },
@@ -142,6 +201,7 @@ export class ReportsService {
           foremanId: work.foremanId,
           foremanNameSnapshot: responsibleName,
           submittedByPersonId: submittedByPerson?.id ?? null,
+          administrativeEntry: !!historicalDate,
           updatedAt: now,
           submittedAt: now,
         });
@@ -154,6 +214,7 @@ export class ReportsService {
           foremanId: work.foremanId,
           foremanNameSnapshot: responsibleName,
           submittedByPersonId: submittedByPerson?.id ?? null,
+          administrativeEntry: !!historicalDate,
           observations,
         });
       report = await reports.save(report);
@@ -229,8 +290,9 @@ export class ReportsService {
       width: photo.width,
       height: photo.height,
     }));
-    const responsibleName =
-      report.submittedByPerson?.fullName ?? report.foremanNameSnapshot;
+    const responsibleName = report.administrativeEntry
+      ? 'Administración'
+      : report.submittedByPerson?.fullName ?? report.foremanNameSnapshot;
     return {
       id: report.id,
       workId: report.workId,
@@ -240,9 +302,10 @@ export class ReportsService {
       submittedBy: {
         personId: report.submittedByPersonId,
         name: responsibleName,
-        accessType: report.submittedByPersonId ? 'PERSONAL' : 'LEGACY',
+        accessType: report.administrativeEntry ? 'ADMIN' : report.submittedByPersonId ? 'PERSONAL' : 'LEGACY',
       },
       observations: report.observations,
+      administrativeEntry: report.administrativeEntry,
       submittedAt: report.submittedAt,
       updatedAt: report.updatedAt,
       workName: report.work.name,
@@ -267,8 +330,9 @@ export class ReportsService {
       order: { workDate: 'DESC' },
     });
     return reports.map((report) => {
-      const responsibleName =
-        report.submittedByPerson?.fullName ?? report.foremanNameSnapshot;
+      const responsibleName = report.administrativeEntry
+        ? 'Administración'
+        : report.submittedByPerson?.fullName ?? report.foremanNameSnapshot;
       return {
         id: report.id,
         date: report.workDate,
@@ -277,7 +341,7 @@ export class ReportsService {
         submittedBy: {
           personId: report.submittedByPersonId,
           name: responsibleName,
-          accessType: report.submittedByPersonId ? 'PERSONAL' : 'LEGACY',
+          accessType: report.administrativeEntry ? 'ADMIN' : report.submittedByPersonId ? 'PERSONAL' : 'LEGACY',
         },
         submittedAt: report.submittedAt,
         updatedAt: report.updatedAt,
@@ -469,6 +533,22 @@ export class ReportsService {
 @Controller('admin')
 export class ReportsController {
   constructor(private readonly reports: ReportsService) {}
+  @Post('works/:id/reports/missing') submitMissing(
+    @Req() req: AdminRequest,
+    @Param('id') id: string,
+    @Body() body: Submission & { date?: string },
+  ) {
+    return this.reports.submitMissing(req.administratorId, id, validDate(body?.date as string), body);
+  }
+  @Get('reports/daily-goals') dailyGoals(
+    @Req() req: AdminRequest,
+    @Query('from') from: string,
+    @Query('to') to: string,
+    @Query('workId') workId?: string,
+    @Query('foremanId') foremanId?: string,
+  ) {
+    return this.reports.dailyGoals(req.administratorId, validDate(from), validDate(to), workId, foremanId);
+  }
   @Get('works/:id/reports') list(
     @Req() req: AdminRequest,
     @Param('id') id: string,

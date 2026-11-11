@@ -95,6 +95,7 @@ export class Foreman {
 @Check('works_dates_valid', `estimated_end_date >= start_date`)
 @Check('works_name_not_blank', `length(btrim(name)) > 0`)
 @Check('works_status_valid', `status IN ('ACTIVA','PAUSADA','FINALIZADA')`)
+@Check('works_pause_reason_valid', `status <> 'PAUSADA' OR (pause_reason IS NOT NULL AND length(btrim(pause_reason)) > 0)`)
 @Index('works_access_alias_global_uq', { synchronize: false })
 @Index('works_access_code_hash_uq', ['accessCodeHash'], { unique: true })
 @Index('works_administrator_status_idx', [
@@ -114,6 +115,7 @@ export class Work {
   @Column('date', { name: 'estimated_end_date' })
   estimatedEndDate!: CalendarDate;
   @Column('varchar', { length: 12, default: 'ACTIVA' }) status!: string;
+  @Column('text', { name: 'pause_reason', nullable: true }) pauseReason!: string | null;
   @Column('varchar', {
     name: 'time_zone',
     length: 100,
@@ -413,6 +415,8 @@ export class DailyReport {
   foremanNameSnapshot!: string;
   @Column('uuid', { name: 'submitted_by_person_id', nullable: true })
   submittedByPersonId!: string | null;
+  @Column('boolean', { name: 'administrative_entry', default: false })
+  administrativeEntry!: boolean;
   @Column('text', { nullable: true }) observations!: string | null;
   @Column('timestamptz', { name: 'submitted_at', default: () => 'now()' })
   submittedAt!: Date;

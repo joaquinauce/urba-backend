@@ -19,6 +19,7 @@ import { In, IsNull, type DataSource, type EntityManager } from 'typeorm';
 import { DB } from './database.module.js';
 import {
   Administrator,
+  Foreman,
   Person,
   PersonRole,
   Role,
@@ -335,7 +336,7 @@ export class PeopleAdminService {
       relations: { person: true },
       order: { assignedAt: 'DESC' },
     });
-    return assignments.map((assignment) => ({
+    const history = assignments.map((assignment) => ({
       id: assignment.id,
       personId: assignment.personId,
       personName: assignment.person.fullName,
@@ -345,6 +346,20 @@ export class PeopleAdminService {
       unassignedAt: assignment.unassignedAt,
       active: assignment.unassignedAt === null,
     }));
+    if (!assignments.some(assignment => assignment.roleCode === 'FOREMAN' && assignment.isPrimary && assignment.unassignedAt === null)) {
+      const foreman = await this.db.getRepository(Foreman).findOneBy({ administratorId, id: work.foremanId });
+      if (foreman) history.unshift({
+        id: `current-foreman-${work.id}`,
+        personId: work.foremanId,
+        personName: `${foreman.firstName} ${foreman.lastName}`,
+        roleCode: 'FOREMAN',
+        isPrimary: true,
+        assignedAt: work.createdAt,
+        unassignedAt: null,
+        active: true,
+      });
+    }
+    return history;
   }
 
   async assign(
@@ -414,6 +429,10 @@ export class PeopleAdminService {
     assignmentId: string,
   ) {
     return this.db.transaction(async (manager) => {
+      const work = await manager.getRepository(Work).createQueryBuilder('work')
+        .where('work.id = :workId AND work.administratorId = :administratorId', { workId, administratorId })
+        .setLock('pessimistic_write').getOne();
+      if (!work) throw new NotFoundException('Obra no encontrada');
       const assignment = await manager
         .getRepository(WorkAssignment)
         .createQueryBuilder('assignment')
@@ -425,6 +444,15 @@ export class PeopleAdminService {
         .getOne();
       if (!assignment) throw new NotFoundException('Asignación no encontrada');
       if (!assignment.unassignedAt) {
+        if (assignment.isPrimary && assignment.roleCode === 'FOREMAN')
+          throw new BadRequestException('El capataz principal se cambia al editar la obra');
+        if (assignment.roleCode === 'SITE_MANAGER') {
+          const activeManagers = await manager.getRepository(WorkAssignment).countBy({
+            administratorId, workId, roleCode: 'SITE_MANAGER', unassignedAt: IsNull(),
+          });
+          if (activeManagers <= 1)
+            throw new BadRequestException('La obra debe conservar un jefe de obra');
+        }
         assignment.unassignedAt = new Date();
         assignment.isPrimary = false;
         assignment.updatedAt = new Date();
