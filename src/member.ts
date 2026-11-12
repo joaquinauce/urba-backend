@@ -43,6 +43,7 @@ export class MemberService {
   async works(request: PersonRequest) {
     const assignments = await this.db.getRepository(WorkAssignment).find({
       where: {
+        clientId: request.actor.clientId,
         administratorId: request.actor.administratorId,
         personId: request.actor.id,
         roleCode: In(request.actor.roles),
@@ -66,6 +67,7 @@ export class MemberService {
       }
     >();
     for (const assignment of assignments) {
+      if (assignment.work.clientId !== request.actor.clientId) continue;
       const existing = result.get(assignment.workId);
       if (existing) {
         if (!existing.roles.includes(assignment.roleCode))

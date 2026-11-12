@@ -15,10 +15,14 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { hash } from 'bcryptjs';
+import { createHash, randomBytes } from 'node:crypto';
 import { In, IsNull, type DataSource, type EntityManager } from 'typeorm';
 import { DB } from './database.module.js';
 import {
   Administrator,
+  ClientMembership,
+  ClientInvitation,
+  ClientRole,
   Foreman,
   Person,
   PersonRole,
@@ -35,11 +39,12 @@ import {
 } from './people-auth.js';
 import { required, uuid } from './shared.js';
 import { clearCodeLookupForManager, recordPersonalEvent } from './personal-security.js';
+import { lockIdentityEmail } from './identity-lock.js';
 
 type ManagedRole = PersonalRole | 'ADMINISTRATOR';
-function validRoles(value: unknown): ManagedRole[] {
-  if (!Array.isArray(value) || value.length !== 1)
-    throw new BadRequestException('Elegí un único tipo de usuario');
+function validRoles(value: unknown, allowEmpty = false): ManagedRole[] {
+  if (!Array.isArray(value) || (!allowEmpty && value.length === 0) || value.length > 3)
+    throw new BadRequestException('Elegí al menos un rol válido');
   const roles = [...new Set(value)];
   if (
     roles.some(
@@ -73,12 +78,13 @@ export class PeopleAdminService {
 
   private async person(
     manager: DataSource | EntityManager,
-    administratorId: string,
+    clientId: string,
     id: string,
   ) {
     const person = await manager.getRepository(Person).createQueryBuilder('person')
+      .innerJoin('person.clientMemberships', 'membership', 'membership.clientId = :clientId', { clientId })
       .addSelect('person.passwordHash')
-      .where('person.id = :id AND person.administratorId = :administratorId', { id, administratorId })
+      .where('person.id = :id', { id })
       .setLock('pessimistic_write')
       .getOne();
     if (!person || person.administratorSourceId)
@@ -86,35 +92,35 @@ export class PeopleAdminService {
     return person;
   }
 
-  async list(administratorId: string) {
+  async list(administratorId: string, clientId = administratorId) {
     const people = await this.db
       .getRepository(Person)
       .createQueryBuilder('person')
+      .innerJoin('person.clientMemberships', 'membership', 'membership.clientId = :clientId', { clientId })
       .addSelect('person.pinLookupHmac')
       .addSelect('person.passwordHash')
-      .where('person.administratorId = :administratorId', {
-        administratorId,
-      })
-      .andWhere('person.administratorSourceId IS NULL')
+      .where('person.administratorSourceId IS NULL')
       .orderBy('person.fullName', 'ASC')
       .getMany();
     if (!people.length) return [];
     const ids = people.map((person) => person.id);
-    const [roles, assignments] = await Promise.all([
-      this.db.getRepository(PersonRole).findBy({
-        administratorId,
+    const [roles, assignments, memberships] = await Promise.all([
+      this.db.getRepository(ClientRole).findBy({
+        clientId,
         personId: In(ids),
       }),
       this.db.getRepository(WorkAssignment).findBy({
-        administratorId,
+        clientId,
         personId: In(ids),
         unassignedAt: IsNull(),
       }),
+      this.db.getRepository(ClientMembership).findBy({ clientId, personId: In(ids) }),
     ]);
     return people.map((person) => ({
       id: person.id,
       fullName: person.fullName,
-      isActive: person.isActive,
+      shared: person.administratorId !== administratorId,
+      isActive: person.isActive && memberships.some((membership) => membership.personId === person.id && membership.isActive),
       hasCode: person.pinLookupHmac !== null,
       email: person.email,
       hasPassword: person.passwordHash !== null,
@@ -133,19 +139,19 @@ export class PeopleAdminService {
   async create(
     administratorId: string,
     body: { fullName?: unknown; roles?: unknown; email?: unknown; password?: unknown },
+    clientId = administratorId,
   ) {
-    const fullName = required(body?.fullName, 'Nombre completo', 201);
     const roles = validRoles(body?.roles);
+    if (roles.length !== 1) throw new BadRequestException('Elegí un rol inicial');
     const needsLogin = roles.includes('SITE_MANAGER') || roles.includes('ADMINISTRATOR');
-    const login = credentials(body, needsLogin);
-    if (needsLogin && !login.password) throw new BadRequestException('Definí la contraseña del usuario');
+    const login = credentials(body, false);
     return this.db.transaction(async (manager) => {
+      if (login.email) await lockIdentityEmail(manager, login.email);
       if (login.email && (await manager.getRepository(Administrator).createQueryBuilder('admin')
-        .where('LOWER(admin.email) = :email', { email: login.email }).getExists()))
+        .where('LOWER(BTRIM(admin.email)) = :email', { email: login.email }).getExists()))
         throw new ConflictException('Ese email ya está en uso');
-      if (login.email && (await manager.getRepository(Person).createQueryBuilder('person')
-        .where('LOWER(person.email) = :email', { email: login.email }).getExists()))
-        throw new ConflictException('Ese email ya está en uso');
+      const existing = login.email ? await manager.getRepository(Person).createQueryBuilder('person')
+        .where('LOWER(BTRIM(person.email)) = :email', { email: login.email }).getOne() : null;
       const available = await manager
         .getRepository(Role)
         .countBy({ code: In(roles) });
@@ -153,6 +159,23 @@ export class PeopleAdminService {
         throw new ConflictException(
           'Los roles requeridos no están disponibles',
         );
+      if (existing) {
+        if (!existing.isActive) throw new ConflictException('La cuenta no está activa para recibir invitaciones');
+        if (await manager.getRepository(ClientMembership).existsBy({ clientId, personId: existing.id }))
+          throw new ConflictException('Ese email ya pertenece a este cliente');
+        const invitations = manager.getRepository(ClientInvitation);
+        await invitations.update({ clientId, personId: existing.id, roleCode: roles[0],
+          acceptedAt: IsNull(), revokedAt: IsNull() }, { revokedAt: new Date() });
+        const token = randomBytes(32).toString('base64url');
+        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60_000);
+        const invitationId = uuid();
+        await invitations.insert({ id: invitationId, clientId, personId: existing.id, roleCode: roles[0],
+          tokenHash: createHash('sha256').update(token).digest('hex'), expiresAt });
+        return { pendingInvitation: true, email: login.email, invitationId, invitationToken: token, expiresAt };
+      }
+      const fullName = required(body?.fullName, 'Nombre completo', 201);
+      if (needsLogin && !login.email) throw new BadRequestException('Definí el email del usuario');
+      if (needsLogin && !login.password) throw new BadRequestException('Definí la contraseña del usuario');
       const person = manager.getRepository(Person).create({
         id: uuid(),
         administratorId,
@@ -176,91 +199,47 @@ export class PeopleAdminService {
     administratorId: string,
     id: string,
     body: { fullName?: unknown; isActive?: unknown; roles?: unknown; email?: unknown; password?: unknown },
+    clientId = administratorId,
   ) {
+    if (body.fullName !== undefined || body.email !== undefined || body.password !== undefined)
+      throw new BadRequestException('Los datos y credenciales globales se cambian desde la cuenta personal');
     return this.db.transaction(async (manager) => {
-      const person = await this.person(manager, administratorId, id);
-      const roles = body.roles === undefined ? null : validRoles(body.roles);
-      const previousRoles = await manager.getRepository(PersonRole).findBy({ administratorId, personId: id });
-      const hadLoginRole = previousRoles.some((role) => role.roleCode === 'SITE_MANAGER' || role.roleCode === 'ADMINISTRATOR');
-      const login = credentials(body, false);
-      if (login.email && login.email !== person.email && (await manager.getRepository(Administrator).createQueryBuilder('admin')
-        .where('LOWER(admin.email) = :email', { email: login.email }).getExists()))
-        throw new ConflictException('Ese email ya está en uso');
-      if (login.email && login.email !== person.email && (await manager.getRepository(Person).createQueryBuilder('other')
-        .where('LOWER(other.email) = :email AND other.id <> :id', { email: login.email, id }).getExists()))
-        throw new ConflictException('Ese email ya está en uso');
-      if (roles) {
-        const existing = await manager.getRepository(PersonRole).findBy({
-          administratorId,
-          personId: id,
-          roleCode: In([...PERSONAL_ROLES, 'ADMINISTRATOR']),
-        });
-        const removed = existing
-          .map((item) => item.roleCode)
-          .filter((role) => !roles.includes(role as PersonalRole));
-        if (
-          removed.length &&
-          (await manager.getRepository(WorkAssignment).existsBy({
-            administratorId,
-            personId: id,
-            roleCode: In(removed),
-            unassignedAt: IsNull(),
-          }))
-        )
-          throw new ConflictException(
-            'Desasigná las obras activas antes de retirar el rol',
-          );
-        if (removed.length)
-          await manager.getRepository(PersonRole).delete({
-            administratorId,
-            personId: id,
-            roleCode: In(removed),
-          });
-        const existingCodes = new Set(existing.map((item) => item.roleCode));
-        const additions = roles.filter((role) => !existingCodes.has(role));
-        if (additions.length)
-          await manager.getRepository(PersonRole).insert(
-            additions.map((roleCode) => ({
-              personId: id,
-              administratorId,
-              roleCode,
-            })),
-          );
+      const person = await this.person(manager, clientId, id);
+      const memberships = manager.getRepository(ClientMembership);
+      const membership = await memberships.findOneBy({ clientId, personId: id });
+      if (!membership) throw new NotFoundException('Pertenencia no encontrada');
+      if (body.roles !== undefined) {
+        const requested = validRoles(body.roles, true);
+        const roleRepository = manager.getRepository(ClientRole);
+        const existing = await roleRepository.findBy({ clientId, personId: id });
+        const desired = new Set(requested);
+        for (const role of existing) {
+          if (desired.has(role.roleCode as ManagedRole)) continue;
+          if (person.administratorId === administratorId &&
+            await manager.getRepository(PersonRole).existsBy({ administratorId, personId: id, roleCode: role.roleCode }))
+            await manager.getRepository(PersonRole).delete({ administratorId, personId: id, roleCode: role.roleCode });
+          else await roleRepository.delete({ clientId, personId: id, roleCode: role.roleCode });
+        }
+        const current = new Set(existing.map((role) => role.roleCode));
+        for (const roleCode of requested) {
+          if (current.has(roleCode)) continue;
+          if (person.administratorId === administratorId)
+            await manager.getRepository(PersonRole).insert({ administratorId, personId: id, roleCode });
+          else await roleRepository.insert({ clientId, personId: id, roleCode });
+        }
       }
-      if (body.fullName !== undefined)
-        person.fullName = required(body.fullName, 'Nombre completo', 201);
-      const effectiveRoles = roles ?? (await manager.getRepository(PersonRole).findBy({ administratorId, personId: id })).map((role) => role.roleCode);
-      const needsLogin = effectiveRoles.includes('SITE_MANAGER') || effectiveRoles.includes('ADMINISTRATOR');
-      if (body.email !== undefined) person.email = login.email;
-      if (login.password) person.passwordHash = await hash(login.password, 12);
-      if (needsLogin && (!person.email || !person.passwordHash) &&
-        (body.email !== undefined || !!login.password || !hadLoginRole))
-        throw new BadRequestException('El usuario necesita email y contraseña');
-      if (!needsLogin) { person.email = null; person.passwordHash = null; }
-      if (body.email !== undefined || login.password || roles) person.sessionVersion = sessionAfter(person.sessionVersion);
       if (body.isActive !== undefined) {
-        if (typeof body.isActive !== 'boolean')
-          throw new BadRequestException('Estado inválido');
-        if (person.isActive !== body.isActive)
-          person.sessionVersion = sessionAfter(person.sessionVersion);
-        person.isActive = body.isActive;
+        if (typeof body.isActive !== 'boolean') throw new BadRequestException('Estado inválido');
+        membership.isActive = body.isActive;
+        membership.updatedAt = new Date();
+        await memberships.save(membership);
       }
-      person.updatedAt = new Date();
-      await manager.getRepository(Person).save(person);
-      const currentRoles = await manager.getRepository(PersonRole).findBy({
-        administratorId,
-        personId: id,
-      });
-      return {
-        id,
-        fullName: person.fullName,
-        email: person.email,
-        isActive: person.isActive,
-        roles: currentRoles.map((role) => role.roleCode),
-      };
+      const currentRoles = await manager.getRepository(ClientRole).findBy({ clientId, personId: id });
+      return { id, fullName: person.fullName, email: person.email,
+        isActive: person.isActive && membership.isActive,
+        roles: currentRoles.map((role) => role.roleCode) };
     });
   }
-
   async rotateCode(administratorId: string, id: string, ip: string | null = null, actorPersonId: string | null = null) {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const code = await generatePersonalCode(this.db);
@@ -278,6 +257,8 @@ export class PeopleAdminService {
             .getOne();
           if (!person || person.administratorSourceId)
             throw new NotFoundException('Persona no encontrada');
+          if (await manager.getRepository(ClientMembership).countBy({ personId: id }) > 1)
+            throw new BadRequestException('El código global de una persona compartida debe gestionarlo su titular');
           const hasPersonalRole = await manager
             .getRepository(PersonRole)
             .existsBy({
@@ -311,6 +292,8 @@ export class PeopleAdminService {
   async unlock(administratorId: string, id: string, ip: string | null = null, actorPersonId: string | null = null) {
     return this.db.transaction(async (manager) => {
       const person = await this.person(manager, administratorId, id);
+      if (await manager.getRepository(ClientMembership).countBy({ personId: id }) > 1)
+        throw new BadRequestException('El acceso global de una persona compartida debe gestionarlo su titular');
       const lookup = await manager.getRepository(Person).createQueryBuilder('person')
         .addSelect('person.pinLookupHmac')
         .where('person.id = :id', { id }).getOne();
@@ -325,14 +308,15 @@ export class PeopleAdminService {
     });
   }
 
-  async assignments(administratorId: string, workId: string) {
+  async assignments(administratorId: string, workId: string, clientId = administratorId) {
     const work = await this.db.getRepository(Work).findOneBy({
       id: workId,
       administratorId,
+      clientId,
     });
     if (!work) throw new NotFoundException('Obra no encontrada');
     const assignments = await this.db.getRepository(WorkAssignment).find({
-      where: { administratorId, workId },
+      where: { administratorId, clientId, workId },
       relations: { person: true },
       order: { assignedAt: 'DESC' },
     });
@@ -366,6 +350,7 @@ export class PeopleAdminService {
     administratorId: string,
     workId: string,
     body: { personId?: unknown; roleCode?: unknown; isPrimary?: unknown },
+    clientId = administratorId,
   ) {
     const personId = required(body?.personId, 'Persona', 36);
     if (body?.roleCode !== 'SITE_MANAGER' && body?.roleCode !== 'FOREMAN')
@@ -378,17 +363,19 @@ export class PeopleAdminService {
           .getRepository(Work)
           .createQueryBuilder('work')
           .where(
-            'work.id = :workId AND work.administratorId = :administratorId',
-            { workId, administratorId },
+            'work.id = :workId AND work.administratorId = :administratorId AND work.clientId = :clientId',
+            { workId, administratorId, clientId },
           )
           .setLock('pessimistic_write')
           .getOne();
         if (!work) throw new NotFoundException('Obra no encontrada');
-        const person = await this.person(manager, administratorId, personId);
+        const person = await this.person(manager, clientId, personId);
         if (!person.isActive)
           throw new BadRequestException('La persona está inactiva');
-        const role = await manager.getRepository(PersonRole).findOneBy({
-          administratorId,
+        if (!(await manager.getRepository(ClientMembership).existsBy({ clientId, personId, isActive: true })))
+          throw new BadRequestException('La persona no está activa en este cliente');
+        const role = await manager.getRepository(ClientRole).findOneBy({
+          clientId,
           personId,
           roleCode,
         });
@@ -397,6 +384,7 @@ export class PeopleAdminService {
         const assignment = manager.getRepository(WorkAssignment).create({
           id: uuid(),
           administratorId,
+          clientId,
           workId,
           personId,
           roleCode,
@@ -427,18 +415,19 @@ export class PeopleAdminService {
     administratorId: string,
     workId: string,
     assignmentId: string,
+    clientId = administratorId,
   ) {
     return this.db.transaction(async (manager) => {
       const work = await manager.getRepository(Work).createQueryBuilder('work')
-        .where('work.id = :workId AND work.administratorId = :administratorId', { workId, administratorId })
+        .where('work.id = :workId AND work.administratorId = :administratorId AND work.clientId = :clientId', { workId, administratorId, clientId })
         .setLock('pessimistic_write').getOne();
       if (!work) throw new NotFoundException('Obra no encontrada');
       const assignment = await manager
         .getRepository(WorkAssignment)
         .createQueryBuilder('assignment')
         .where(
-          'assignment.id = :assignmentId AND assignment.workId = :workId AND assignment.administratorId = :administratorId',
-          { assignmentId, workId, administratorId },
+          'assignment.id = :assignmentId AND assignment.workId = :workId AND assignment.administratorId = :administratorId AND assignment.clientId = :clientId',
+          { assignmentId, workId, administratorId, clientId },
         )
         .setLock('pessimistic_write')
         .getOne();
@@ -474,12 +463,12 @@ export class PeopleAdminController {
 
   @Get()
   list(@Req() request: AdminRequest) {
-    return this.people.list(request.administratorId);
+    return this.people.list(request.administratorId, request.clientId);
   }
 
   @Post()
   create(@Req() request: AdminRequest, @Body() body: any) {
-    return this.people.create(request.administratorId, body);
+    return this.people.create(request.administratorId, body, request.clientId);
   }
 
   @Patch(':id')
@@ -488,7 +477,7 @@ export class PeopleAdminController {
     @Param('id') id: string,
     @Body() body: any,
   ) {
-    return this.people.update(request.administratorId, id, body);
+    return this.people.update(request.administratorId, id, body, request.clientId);
   }
 
   @Post(':id/code/rotate')
@@ -509,7 +498,7 @@ export class AssignmentAdminController {
 
   @Get()
   list(@Req() request: AdminRequest, @Param('workId') workId: string) {
-    return this.people.assignments(request.administratorId, workId);
+    return this.people.assignments(request.administratorId, workId, request.clientId);
   }
 
   @Post()
@@ -518,7 +507,7 @@ export class AssignmentAdminController {
     @Param('workId') workId: string,
     @Body() body: any,
   ) {
-    return this.people.assign(request.administratorId, workId, body);
+    return this.people.assign(request.administratorId, workId, body, request.clientId);
   }
 
   @Patch(':assignmentId/unassign')
@@ -527,6 +516,6 @@ export class AssignmentAdminController {
     @Param('workId') workId: string,
     @Param('assignmentId') assignmentId: string,
   ) {
-    return this.people.unassign(request.administratorId, workId, assignmentId);
+    return this.people.unassign(request.administratorId, workId, assignmentId, request.clientId);
   }
 }

@@ -16,6 +16,7 @@ const legacyTables = [
 ];
 
 const additiveTables = ['people', 'person_roles', 'roles', 'work_assignments'];
+const multiclientTables = ['clients', 'client_memberships', 'client_roles', 'client_invitations'];
 
 describe('metadatos de persistencia', () => {
   it('registra todas las entidades sin habilitar cambios automáticos de esquema', async () => {
@@ -32,7 +33,7 @@ describe('metadatos de persistencia', () => {
       .map((metadata) => metadata.tableName)
       .sort();
 
-    expect(tables).toEqual([...legacyTables, ...additiveTables].sort());
+    expect(tables).toEqual([...legacyTables, ...additiveTables, ...multiclientTables].sort());
     expect(
       source.entityMetadatas.every((metadata) => metadata.relations.length > 0),
     ).toBe(true);
@@ -118,7 +119,7 @@ describe('metadatos de persistencia', () => {
     ).toBe(true);
     expect(
       assignments.relations.map((relation) => relation.propertyName).sort(),
-    ).toEqual(['person', 'personRole', 'work']);
+    ).toEqual(['clientRole', 'person', 'personRole', 'work']);
   });
 
   it('modela la trazabilidad nullable del responsable de informes', async () => {
@@ -141,7 +142,7 @@ describe('metadatos de persistencia', () => {
       responsibleRelation?.joinColumns
         .map((column) => column.databaseName)
         .sort(),
-    ).toEqual(['administrator_id', 'submitted_by_person_id'].sort());
+    ).toEqual(['submitted_by_person_id']);
     expect(
       reports.indices.some(
         (index) =>

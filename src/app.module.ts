@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { DatabaseModule } from './database.module.js';
-import { AuthController, AuthService, JwtGuard } from './auth.js';
+import { AuthController, AuthService, ContextGuard, JwtGuard } from './auth.js';
 import { AdminController, AdminService } from './admin.js';
 import { AliasController, PublicController, PublicService } from './public.js';
 import { ReportsController, ReportsService } from './reports.js';
@@ -21,6 +21,9 @@ import {
 import { MemberController, MemberService } from './member.js';
 import { AdminExpensesController, MemberExpensesController, LegacyExpensesController, ExpensesService } from './expenses.js';
 import { PersonalSecurityService } from './personal-security.js';
+import { PlatformController, PlatformService } from './platform.js';
+import { PlatformGuard } from './platform-access.js';
+import { IdentityGuard, InvitationController, InvitationService } from './invitations.js';
 
 @Module({
   imports: [
@@ -43,6 +46,8 @@ import { PersonalSecurityService } from './personal-security.js';
   controllers: [
     HealthController,
     AuthController,
+    PlatformController,
+    InvitationController,
     PersonAuthController,
     AdminController,
     PeopleAdminController,
@@ -57,7 +62,12 @@ import { PersonalSecurityService } from './personal-security.js';
   ],
   providers: [
     AuthService,
+    PlatformService,
+    PlatformGuard,
+    IdentityGuard,
+    InvitationService,
     JwtGuard,
+    ContextGuard,
     PersonAuthService,
     PersonalSecurityService,
     PersonJwtGuard,

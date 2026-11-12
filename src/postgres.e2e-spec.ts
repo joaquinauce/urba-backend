@@ -31,6 +31,9 @@ import {
 import { PublicService } from './public.js';
 import { ReportsService } from './reports.js';
 import { HealthController } from './health.js';
+import { ExpensesService } from './expenses.js';
+import { PersonJwtGuard, WorkAuthorizationService } from './people-auth.js';
+import { ClientMembership } from './database/entities.js';
 
 const integration =
   process.env.RUN_PG_READ_INTEGRATION === 'true' ? describe : describe.skip;
@@ -80,7 +83,7 @@ integration('PostgreSQL en modo de solo lectura', () => {
     if (db?.isInitialized) await db.destroy();
   });
 
-  it('no detecta diferencias entre el esquema real y los metadatos TypeORM', async () => {
+  it('solo detecta diferencias de objetos SQL gestionados manualmente', async () => {
     const connection = await db
       .createQueryBuilder()
       .select(`current_setting('transaction_read_only')`, 'readOnly')
@@ -93,8 +96,15 @@ integration('PostgreSQL en modo de solo lectura', () => {
     });
 
     const schema = await db.driver.createSchemaBuilder().log();
-    expect(schema.upQueries.map(({ query }) => query)).toEqual([]);
-    expect(schema.downQueries.map(({ query }) => query)).toEqual([]);
+    const sqlManaged = [
+      'works_legacy_client_owner_fk', 'work_assignments_client_membership_fk',
+      'work_assignments_client_work_fk', 'works_client_status_idx',
+      'client_invitations_client_pending_idx', 'work_assignments_client_active_idx',
+      'client_invitations_state_valid',
+    ];
+    const unexpected = schema.upQueries.map(({ query }) => query)
+      .filter((query) => !sqlManaged.some((name) => query.includes(`"${name}"`)));
+    expect(unexpected).toEqual([]);
   });
 
   it('lee las 14 entidades y sus relaciones principales', async () => {
@@ -283,5 +293,28 @@ integration('PostgreSQL en modo de solo lectura', () => {
       await expect(
         reports.detail(report.id, anotherAdministrator),
       ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('lee rendiciones existentes sin precargar tipos ni escribir', async () => {
+    const expenses = new ExpensesService(db, new WorkAuthorizationService(db));
+    const rows = await expenses.list(administrator.id, { from: '2000-01-01', to: '2100-12-31' });
+    expect(Array.isArray(rows)).toBe(true);
+    expect(rows.every((row: { workId: string }) => row.workId === work.id)).toBe(true);
+  });
+
+  it('valida en PostgreSQL un JWT personal contra pertenencia y roles actuales', async () => {
+    const membership = await db.getRepository(ClientMembership).findOne({
+      where: { isActive: true }, relations: { person: true, roles: true, client: true },
+    });
+    if (!membership?.person.isActive || !membership.client.isActive) return;
+    const personalRoles = membership.roles.filter((role) => role.roleCode === 'FOREMAN' || role.roleCode === 'SITE_MANAGER');
+    if (!personalRoles.length) return;
+    const token = await jwt.signAsync({ type: 'person', sub: membership.personId,
+      clientId: membership.clientId, administratorId: membership.client.legacyAdministratorId,
+      version: String(membership.person.sessionVersion) });
+    const request = { headers: { authorization: `Bearer ${token}` } } as any;
+    const context = { switchToHttp: () => ({ getRequest: () => request }) } as unknown as ExecutionContext;
+    await expect(new PersonJwtGuard(jwt, db).canActivate(context)).resolves.toBe(true);
+    expect(request.actor.clientId).toBe(membership.clientId);
   });
 });

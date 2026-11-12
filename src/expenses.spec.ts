@@ -6,7 +6,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const actor = { kind: 'person' as const, id: '11111111-1111-4111-8111-111111111111', administratorId: '22222222-2222-4222-8222-222222222222', fullName: 'Capataz', roles: ['FOREMAN' as const] };
+const actor = { kind: 'person' as const, id: '11111111-1111-4111-8111-111111111111', clientId: '22222222-2222-4222-8222-222222222222', administratorId: '22222222-2222-4222-8222-222222222222', fullName: 'Capataz', roles: ['FOREMAN' as const] };
 const workId = '33333333-3333-4333-8333-333333333333';
 const typeId = '44444444-4444-4444-8444-444444444444';
 const requestId = '55555555-5555-4555-8555-555555555555';
@@ -14,6 +14,19 @@ const request = { actor } as never;
 const file = { buffer: Buffer.from('foto'), size: 4 } as Express.Multer.File;
 
 describe('rendiciones', () => {
+  it('autoriza la obra antes de entregar un comprobante personal', async () => {
+    const expenseId = '77777777-7777-4777-8777-777777777777';
+    const query = vi.fn(async (_sql: string, params: unknown[]) => {
+      expect(params).toEqual([expenseId, actor.id, actor.administratorId, actor.clientId]);
+      return [{ workId }];
+    });
+    const authorize = vi.fn().mockRejectedValue(new ForbiddenException('Sin asignación'));
+    const service = new ExpensesService({ query } as never, { authorize } as never);
+    const photo = vi.spyOn(service, 'photo');
+    await expect(service.memberPhoto(request, expenseId)).rejects.toBeInstanceOf(ForbiddenException);
+    expect(authorize).toHaveBeenCalledWith(actor, workId);
+    expect(photo).not.toHaveBeenCalled();
+  });
   it('rechaza monto no positivo y fotografía faltante antes de tocar la base', async () => {
     const query = vi.fn(); const authorize = vi.fn();
     const service = new ExpensesService({ query } as never, { authorize } as never);

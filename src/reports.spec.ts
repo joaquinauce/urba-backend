@@ -6,6 +6,7 @@ import {
   DailyReportItem,
   Foreman,
   Person,
+  ClientMembership,
   Work,
 } from './database/entities.js';
 import { ReportsService } from './reports.js';
@@ -14,6 +15,7 @@ import { localNow } from './shared.js';
 const work = Object.assign(new Work(), {
   id: 'work',
   administratorId: 'admin',
+  clientId: 'client-b',
   foremanId: 'foreman',
   timeZone: 'America/Argentina/Buenos_Aires',
   closeTime: '23:59:00',
@@ -42,7 +44,7 @@ const goals = [
   }),
 ];
 
-function setup() {
+function setup(membershipActive = true) {
   const date = localNow(work.timeZone).date;
   const savedItems: DailyReportItem[] = [];
   const savedReports: DailyReport[] = [];
@@ -87,11 +89,11 @@ function setup() {
     [
       Person,
       {
-        findOneBy: vi.fn(async ({ id, administratorId }) =>
-          id === 'person-1' && administratorId === 'admin'
+        findOneBy: vi.fn(async ({ id }) =>
+          id === 'person-1'
             ? Object.assign(new Person(), {
                 id: 'person-1',
-                administratorId: 'admin',
+                administratorId: 'admin-a',
                 fullName: 'María Capataz',
                 isActive: true,
               })
@@ -99,6 +101,8 @@ function setup() {
         ),
       },
     ],
+    [ClientMembership, { existsBy: vi.fn(async ({ clientId, personId, isActive }) =>
+      membershipActive && clientId === 'client-b' && personId === 'person-1' && isActive === true) }],
   ]);
   const manager = {
     getRepository: (target: unknown) => repositories.get(target),
@@ -149,7 +153,7 @@ describe('envío diario', () => {
       foremanNameSnapshot: 'Carlos Pérez',
     });
   });
-  it('atribuye el informe a la persona autenticada del mismo administrador', async () => {
+  it('atribuye el informe a una persona compartida del cliente de la obra', async () => {
     const { service, savedReports } = setup();
     await service.submit(
       work,
@@ -166,7 +170,7 @@ describe('envío diario', () => {
       foremanNameSnapshot: 'María Capataz',
     });
   });
-  it('rechaza responsables inexistentes o pertenecientes a otro administrador', async () => {
+  it('rechaza responsables inexistentes', async () => {
     const { service, savedReports } = setup();
     await expect(
       service.submit(
@@ -180,6 +184,14 @@ describe('envío diario', () => {
         'person-from-another-administrator',
       ),
     ).rejects.toThrow('Responsable no encontrado');
+    expect(savedReports).toHaveLength(0);
+  });
+  it('rechaza una identidad global sin pertenencia activa al cliente de la obra', async () => {
+    const { service, savedReports } = setup(false);
+    await expect(service.submit(work, { items: [
+      { goalId: 'goal-1', actualQuantity: 1 },
+      { goalId: 'goal-2', actualQuantity: 1 },
+    ] }, 'person-1')).rejects.toThrow('Responsable no pertenece al cliente');
     expect(savedReports).toHaveLength(0);
   });
   it('rechaza informes incompletos antes de escribir', async () => {

@@ -17,9 +17,12 @@ import { compare, hash } from 'bcryptjs';
 import type { Request } from 'express';
 import type { DataSource } from 'typeorm';
 import { DB } from './database.module.js';
-import { Administrator, Person, PersonRole } from './database/entities.js';
+import { Administrator, Client, Person } from './database/entities.js';
+import { activeClientAccess, activeClientAccesses, legacyAdministratorClient, legacyClientContext, scopedPersonSession } from './client-access.js';
+import { isPlatformOperator } from './platform-access.js';
 
-export type AdminRequest = Request & { administratorId: string; administratorPersonId?: string };
+export type AdminRequest = Request & { administratorId: string; clientId: string; administratorPersonId?: string };
+type ContextRequest = Request & { contextPersonId: string; contextMode: 'password' | 'pin' };
 
 @Injectable()
 export class AuthService {
@@ -53,7 +56,7 @@ export class AuthService {
       .getRepository(Administrator)
       .createQueryBuilder('administrator')
       .addSelect('administrator.passwordHash')
-      .where('LOWER(administrator.email) = LOWER(:email)', {
+      .where('LOWER(BTRIM(administrator.email)) = LOWER(:email)', {
         email: email.trim(),
       })
       .andWhere('administrator.isActive = :active', { active: true })
@@ -61,44 +64,81 @@ export class AuthService {
     if (!admin || !(await compare(password, admin.passwordHash))) {
       const person = await this.db.getRepository(Person).createQueryBuilder('person')
         .addSelect('person.passwordHash')
-        .where('LOWER(person.email) = LOWER(:email)', { email: email.trim() })
+        .where('LOWER(BTRIM(person.email)) = LOWER(:email)', { email: email.trim() })
         .andWhere('person.isActive = :active', { active: true }).getOne();
       if (!person?.passwordHash || !(await compare(password, person.passwordHash)))
         throw new UnauthorizedException('Credenciales incorrectas');
-      const roles = (await this.db.getRepository(PersonRole).findBy({
-        administratorId: person.administratorId, personId: person.id,
-      })).map((role) => role.roleCode);
-      if (roles.includes('ADMINISTRATOR')) {
-        this.attempts.delete(key);
-        return {
-          accessToken: await this.jwt.signAsync({ type: 'administrator_person', sub: person.id,
-            administratorId: person.administratorId, version: String(person.sessionVersion) }),
-          administrator: { id: person.id, email: person.email, fullName: person.fullName, role: 'ADMINISTRATOR' },
-        };
-      }
-      if (!roles.includes('SITE_MANAGER')) throw new UnauthorizedException('Credenciales incorrectas');
+      const accesses = (await activeClientAccesses(this.db, person.id))
+        .filter((access) => access.roles.some((role) => ['ADMINISTRATOR', 'SITE_MANAGER', 'FOREMAN'].includes(role)));
+      if (!accesses.length) throw new UnauthorizedException('Credenciales incorrectas');
       this.attempts.delete(key);
-      return {
-        accessToken: await this.jwt.signAsync({ type: 'person', sub: person.id,
-          administratorId: person.administratorId, version: String(person.sessionVersion) }, { expiresIn: '8h' }),
-        person: { id: person.id, administratorId: person.administratorId,
-          fullName: person.fullName, roles: roles.filter((role) => role === 'SITE_MANAGER' || role === 'FOREMAN') },
+      if (accesses.length > 1) return {
+        requiresClientSelection: true,
+        selectionToken: await this.jwt.signAsync({ type: 'person_selection', mode: 'password', sub: person.id,
+          version: String(person.sessionVersion) }, { expiresIn: '5m' }),
+        clients: accesses.map(({ clientId, name, roles }) => ({ clientId, name, roles })),
       };
+      const session = await scopedPersonSession(this.jwt, person, accesses[0], 'password');
+      if ('administrator' in session) return { ...session, administrator: { ...session.administrator,
+        platformOperator: isPlatformOperator({ administratorId: accesses[0].administratorId, administratorPersonId: person.id }) } };
+      return session;
     }
+    const client = await legacyAdministratorClient(this.db, admin.id);
     this.attempts.delete(key);
     return {
       accessToken: await this.jwt.signAsync({
         type: 'administrator',
         sub: admin.id,
         administratorId: admin.id,
+        clientId: client.id,
       }),
       administrator: {
         id: admin.id,
         email: admin.email,
         fullName: admin.fullName,
         role: 'ADMINISTRATOR',
+        clientId: client.id,
+        clientName: client.name,
+        platformOperator: isPlatformOperator({ administratorId: admin.id }),
       },
     };
+  }
+
+  async selectClient(selectionToken: unknown, clientId: unknown) {
+    if (typeof selectionToken !== 'string' || typeof clientId !== 'string')
+      throw new UnauthorizedException('Selección de cliente inválida');
+    try {
+      const payload = await this.jwt.verifyAsync<{ type: string; mode: string; sub: string; version: string }>(selectionToken);
+      if (payload.type !== 'person_selection' || payload.mode !== 'password') throw new Error('mode');
+      const person = await this.db.getRepository(Person).findOneBy({ id: payload.sub, isActive: true });
+      if (!person || String(person.sessionVersion) !== String(payload.version)) throw new Error('revoked');
+      const access = await activeClientAccess(this.db, person.id, clientId, ['ADMINISTRATOR', 'SITE_MANAGER', 'FOREMAN']);
+      const session = await scopedPersonSession(this.jwt, person, access, 'password');
+      if ('administrator' in session) return { ...session, administrator: { ...session.administrator,
+        platformOperator: isPlatformOperator({ administratorId: access.administratorId, administratorPersonId: person.id }) } };
+      return session;
+    } catch { throw new UnauthorizedException('Selección de cliente inválida'); }
+  }
+
+  async contexts(personId: string, mode: 'password' | 'pin') {
+    const accesses = await activeClientAccesses(this.db, personId);
+    return accesses.filter((access) => mode === 'password'
+      ? access.roles.some((role) => ['ADMINISTRATOR', 'SITE_MANAGER', 'FOREMAN'].includes(role))
+      : access.roles.some((role) => ['SITE_MANAGER', 'FOREMAN'].includes(role)))
+      .map(({ clientId, name, roles }) => ({ clientId, name,
+        roles: mode === 'pin' ? roles.filter((role) => role === 'SITE_MANAGER' || role === 'FOREMAN') : roles }));
+  }
+
+  async switchClient(personId: string, mode: 'password' | 'pin', clientId: unknown) {
+    if (typeof clientId !== 'string') throw new UnauthorizedException('Cliente inválido');
+    const person = await this.db.getRepository(Person).findOneBy({ id: personId, isActive: true });
+    if (!person) throw new UnauthorizedException();
+    const access = await activeClientAccess(this.db, personId, clientId,
+      mode === 'password' ? ['ADMINISTRATOR', 'SITE_MANAGER', 'FOREMAN'] : ['SITE_MANAGER', 'FOREMAN']);
+    const session = await scopedPersonSession(this.jwt, person, access, mode);
+    if ('administrator' in session) return { ...session, administrator: { ...session.administrator,
+      platformOperator: isPlatformOperator({ administratorId: access.administratorId, administratorPersonId: person.id }) } };
+    return session;
   }
 
   async changePassword(administratorId: string, administratorPersonId: string | undefined, body: { currentPassword?: unknown; newPassword?: unknown }) {
@@ -131,6 +171,25 @@ export class AuthService {
 }
 
 @Injectable()
+export class ContextGuard implements CanActivate {
+  constructor(private readonly jwt: JwtService, @Inject(DB) private readonly db: DataSource) {}
+  async canActivate(context: ExecutionContext) {
+    const request = context.switchToHttp().getRequest<ContextRequest>();
+    const header = request.headers.authorization ?? '';
+    if (!header.startsWith('Bearer ')) throw new UnauthorizedException();
+    try {
+      const payload = await this.jwt.verifyAsync<{ type?: string; sub: string; version?: string; mode?: string }>(header.slice(7));
+      if (!['person', 'administrator_person'].includes(payload.type ?? '')) throw new Error('profile');
+      const person = await this.db.getRepository(Person).findOneBy({ id: payload.sub, isActive: true });
+      if (!person || String(person.sessionVersion) !== String(payload.version)) throw new Error('revoked');
+      request.contextPersonId = person.id;
+      request.contextMode = payload.type === 'administrator_person' || payload.mode === 'password' ? 'password' : 'pin';
+      return true;
+    } catch { throw new UnauthorizedException('La sesión venció'); }
+  }
+}
+
+@Injectable()
 export class JwtGuard implements CanActivate {
   constructor(
     private readonly jwt: JwtService,
@@ -145,17 +204,20 @@ export class JwtGuard implements CanActivate {
         type?: string;
         sub: string;
         administratorId?: string;
+        clientId?: string;
         version?: string;
       }>(header.slice(7));
       if (payload.type === 'administrator_person') {
-        const person = await this.db.getRepository(Person).findOneBy({ id: payload.sub,
-          administratorId: payload.administratorId, isActive: true });
+        const person = await this.db.getRepository(Person).findOneBy({ id: payload.sub, isActive: true });
         if (!person || String(person.sessionVersion) !== String(payload.version) || !person.email)
           throw new Error('inactive');
-        if (!(await this.db.getRepository(PersonRole).existsBy({
-          personId: person.id, administratorId: person.administratorId, roleCode: 'ADMINISTRATOR',
-        }))) throw new Error('role');
-        req.administratorId = person.administratorId;
+        const access = payload.clientId
+          ? await activeClientAccess(this.db, person.id, payload.clientId, ['ADMINISTRATOR'])
+          : legacyClientContext((await activeClientAccesses(this.db, person.id))
+              .filter((item) => item.roles.includes('ADMINISTRATOR')), payload.administratorId);
+        if (payload.administratorId && payload.administratorId !== access.administratorId) throw new Error('owner');
+        req.administratorId = access.administratorId;
+        req.clientId = access.clientId;
         req.administratorPersonId = person.id;
         return true;
       }
@@ -164,7 +226,10 @@ export class JwtGuard implements CanActivate {
         .getRepository(Administrator)
         .existsBy({ id: payload.sub, isActive: true });
       if (!active) throw new Error('inactive');
+      const client = await legacyAdministratorClient(this.db, payload.sub);
+      if (payload.clientId && payload.clientId !== client.id) throw new Error('client');
       req.administratorId = payload.sub;
+      req.clientId = client.id;
       return true;
     } catch {
       throw new UnauthorizedException();
@@ -184,19 +249,31 @@ export class AuthController {
   ) {
     return this.auth.login(body.email, body.password, req.ip ?? 'unknown');
   }
+  @Post('select-client') selectClient(@Body() body: { selectionToken?: unknown; clientId?: unknown }) {
+    return this.auth.selectClient(body?.selectionToken, body?.clientId);
+  }
+  @UseGuards(ContextGuard) @Get('contexts') contexts(@Req() req: ContextRequest) {
+    return this.auth.contexts(req.contextPersonId, req.contextMode);
+  }
+  @UseGuards(ContextGuard) @Post('switch-client') switchClient(@Req() req: ContextRequest, @Body() body: { clientId?: unknown }) {
+    return this.auth.switchClient(req.contextPersonId, req.contextMode, body?.clientId);
+  }
   @UseGuards(JwtGuard) @Get('me') async me(@Req() req: AdminRequest) {
+    const client = await this.db.getRepository(Client).findOneBy({ id: req.clientId });
     if (req.administratorPersonId) {
       const person = await this.db.getRepository(Person).findOne({
         select: { id: true, email: true, fullName: true },
-        where: { id: req.administratorPersonId, administratorId: req.administratorId },
+        where: { id: req.administratorPersonId },
       });
-      return person ? { ...person, role: 'ADMINISTRATOR' } : undefined;
+      return person ? { ...person, role: 'ADMINISTRATOR', clientId: req.clientId, clientName: client?.name,
+        platformOperator: isPlatformOperator(req) } : undefined;
     }
     const administrator = await this.db.getRepository(Administrator).findOne({
       select: { id: true, email: true, fullName: true },
       where: { id: req.administratorId },
     });
-    return administrator ? { ...administrator, role: 'ADMINISTRATOR' } : undefined;
+    return administrator ? { ...administrator, role: 'ADMINISTRATOR', clientId: req.clientId, clientName: client?.name,
+      platformOperator: isPlatformOperator(req) } : undefined;
   }
   @UseGuards(JwtGuard) @Post('password') password(@Req() req: AdminRequest, @Body() body: { currentPassword?: unknown; newPassword?: unknown }) {
     return this.auth.changePassword(req.administratorId, req.administratorPersonId, body);

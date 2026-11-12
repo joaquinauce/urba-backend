@@ -46,10 +46,12 @@ export class PublicService {
       .getRepository(Work)
       .createQueryBuilder('work')
       .innerJoin('work.primaryForeman', 'foreman')
+      .innerJoin('work.client', 'client')
       .select('work.accessAlias', 'alias')
       .where('work.accessAlias IS NOT NULL')
       .andWhere('work.status = :status', { status: 'ACTIVA' })
       .andWhere('foreman.isActive = :active', { active: true })
+      .andWhere('client.isActive = :clientActive', { clientActive: true })
       .orderBy('work.accessAlias', 'ASC')
       .getRawMany<{ alias: string }>();
   }
@@ -78,10 +80,12 @@ export class PublicService {
             .getRepository(Work)
             .createQueryBuilder('work')
             .innerJoin('work.primaryForeman', 'foreman')
+            .innerJoin('work.client', 'client')
             .addSelect('work.aliasPinHash')
             .where('work.accessAlias = :alias', { alias })
             .andWhere('work.status = :status', { status: 'ACTIVA' })
             .andWhere('foreman.isActive = :active', { active: true })
+            .andWhere('client.isActive = :clientActive', { clientActive: true })
             .getOne()
         : null;
     const valid = work
@@ -97,6 +101,7 @@ export class PublicService {
         {
           type: 'foreman',
           workId: work.id,
+          clientId: work.clientId,
           version: String(work.aliasSessionVersion),
         },
         { expiresIn: '8h' },
@@ -110,16 +115,19 @@ export class PublicService {
       const payload = await this.jwt.verifyAsync<{
         type: string;
         workId: string;
+        clientId?: string;
         version: string;
       }>(header.slice(7));
       if (payload.type !== 'foreman' || !payload.workId)
         throw new Error('invalid');
       const work = await this.db.getRepository(Work).findOne({
         where: { id: payload.workId, status: 'ACTIVA' },
-        relations: { primaryForeman: true },
+        relations: { primaryForeman: true, client: true },
       });
       if (
         !work ||
+        !work.client.isActive ||
+        (payload.clientId && payload.clientId !== work.clientId) ||
         !work.accessAlias ||
         !work.primaryForeman.isActive ||
         String(work.aliasSessionVersion) !== payload.version
@@ -157,9 +165,9 @@ export class PublicService {
       throw new BadRequestException('Código inválido');
     const work = await this.db.getRepository(Work).findOne({
       where: { accessCodeHash: codeHash(code) },
-      relations: { primaryForeman: true },
+      relations: { primaryForeman: true, client: true },
     });
-    if (!work) throw new NotFoundException('Recurso no encontrado');
+    if (!work?.client.isActive) throw new NotFoundException('Recurso no encontrado');
     return Object.assign(work, {
       foremanName: `${work.primaryForeman.firstName} ${work.primaryForeman.lastName}`,
     }) as PublicWork;

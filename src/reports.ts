@@ -30,6 +30,7 @@ import {
   DailyReportItem,
   Foreman,
   Person,
+  ClientMembership,
   ReportCorrection,
   ReportPhoto,
   Work,
@@ -182,12 +183,14 @@ export class ReportsService {
       const submittedByPerson = submittedByPersonId
         ? await tx.getRepository(Person).findOneBy({
             id: submittedByPersonId,
-            administratorId: work.administratorId,
             isActive: true,
           })
         : null;
       if (submittedByPersonId && !submittedByPerson)
         throw new NotFoundException('Responsable no encontrado');
+      if (submittedByPersonId && !(await tx.getRepository(ClientMembership).existsBy({
+        clientId: work.clientId, personId: submittedByPersonId, isActive: true,
+      }))) throw new NotFoundException('Responsable no pertenece al cliente de la obra');
       const responsibleName =
         submittedByPerson?.fullName ??
         `${foreman.firstName} ${foreman.lastName}`;

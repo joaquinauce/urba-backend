@@ -146,6 +146,19 @@ export class ExpensesService {
     if (!/^[0-9a-f-]{36}\.webp$/.test(key)) throw new BadRequestException('Comprobante inválido');
     return readFile(join(storageDir(), key));
   }
+
+  async memberPhoto(request: PersonRequest, expenseId: string) {
+    if (!uuid(expenseId)) throw new BadRequestException('Rendición inválida');
+    const rows = await this.db.query(
+      `SELECT e.work_id AS "workId" FROM expense_reports e
+       JOIN works w ON w.id = e.work_id AND w.administrator_id = e.administrator_id
+       WHERE e.id = $1 AND e.person_id = $2 AND e.administrator_id = $3 AND w.client_id = $4`,
+      [expenseId, request.actor.id, request.actor.administratorId, request.actor.clientId],
+    );
+    if (!rows.length) throw new NotFoundException('Comprobante no encontrado');
+    await this.authorization.authorize(request.actor, rows[0].workId);
+    return this.photo(request.actor.administratorId, expenseId, request.actor.id, undefined, rows[0].workId);
+  }
 }
 
 @UseGuards(JwtGuard)
@@ -169,7 +182,9 @@ export class MemberExpensesController {
   @Post('works/:workId')
   @UseInterceptors(FileInterceptor('photo', { limits: { fileSize: receiptUploadLimit } }))
   create(@Req() req: PersonRequest, @Param('workId') workId: string, @Body() body: { amount?: unknown; typeId?: unknown; requestId?: unknown }, @UploadedFile() file: Express.Multer.File) { return this.expenses.create(req, workId, body, file); }
-  @Get(':id/receipt') async photo(@Req() req: PersonRequest, @Param('id') id: string, @Res() res: Response) { res.type('image/webp').send(await this.expenses.photo(req.actor.administratorId, id, req.actor.id)); }
+  @Get(':id/receipt') async photo(@Req() req: PersonRequest, @Param('id') id: string, @Res() res: Response) {
+    res.type('image/webp').send(await this.expenses.memberPhoto(req, id));
+  }
 }
 
 @Controller('public/session/expenses')

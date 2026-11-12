@@ -23,6 +23,8 @@ import { JwtGuard } from './auth.js';
 import type { AdminRequest } from './auth.js';
 import {
   Activity,
+  ClientMembership,
+  ClientRole,
   DailyGoal,
   DailyReport,
   DailyReportItem,
@@ -356,9 +358,10 @@ export class AdminService {
             });
             const keep = assignments.find(assignment => assignment.personId === body.siteManagerId);
             if (body.siteManagerId && !keep) {
-              const person = await tx.getRepository(Person).findOneBy({ id: body.siteManagerId, administratorId: adminId, isActive: true });
-              const role = await tx.getRepository(PersonRole).findOneBy({ personId: body.siteManagerId, administratorId: adminId, roleCode: 'SITE_MANAGER' });
-              if (!person || !role) throw new BadRequestException('Jefe de obra no disponible');
+              const person = await tx.getRepository(Person).findOneBy({ id: body.siteManagerId, isActive: true });
+              const membership = await tx.getRepository(ClientMembership).existsBy({ clientId: previous.clientId, personId: body.siteManagerId, isActive: true });
+              const role = await tx.getRepository(ClientRole).findOneBy({ personId: body.siteManagerId, clientId: previous.clientId, roleCode: 'SITE_MANAGER' });
+              if (!person || !membership || !role) throw new BadRequestException('Jefe de obra no disponible');
             }
             for (const assignment of assignments) {
               if (assignment === keep) continue;
@@ -408,9 +411,10 @@ export class AdminService {
     try {
       await this.db.transaction(async (manager) => {
         for (const assignment of assignments) {
-          const person = await manager.getRepository(Person).findOneBy({ id: assignment.personId, administratorId: adminId, isActive: true });
-          const role = await manager.getRepository(PersonRole).findOneBy({ personId: assignment.personId, administratorId: adminId, roleCode: assignment.roleCode });
-          if (!person || !role) throw new BadRequestException('Responsable no disponible para ese rol');
+          const person = await manager.getRepository(Person).findOneBy({ id: assignment.personId, isActive: true });
+          const membership = await manager.getRepository(ClientMembership).existsBy({ clientId: adminId, personId: assignment.personId, isActive: true });
+          const role = await manager.getRepository(ClientRole).findOneBy({ personId: assignment.personId, clientId: adminId, roleCode: assignment.roleCode });
+          if (!person || !membership || !role) throw new BadRequestException('Responsable no disponible para ese rol');
         }
         const savedWork = await manager.getRepository(Work).save(manager.getRepository(Work).create({
           id: workId,

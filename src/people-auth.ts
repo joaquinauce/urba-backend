@@ -18,8 +18,9 @@ import { createHmac, randomInt } from 'node:crypto';
 import type { Request } from 'express';
 import { In, IsNull, type DataSource, type EntityManager } from 'typeorm';
 import { DB } from './database.module.js';
-import { Person, PersonRole, WorkAssignment } from './database/entities.js';
+import { Person, WorkAssignment } from './database/entities.js';
 import { PersonalSecurityService } from './personal-security.js';
+import { activeClientAccess, activeClientAccesses, legacyClientContext, scopedPersonSession } from './client-access.js';
 
 export const PERSONAL_ROLES = ['SITE_MANAGER', 'FOREMAN'] as const;
 export type PersonalRole = (typeof PERSONAL_ROLES)[number];
@@ -27,6 +28,7 @@ export type PersonalRole = (typeof PERSONAL_ROLES)[number];
 export type PersonActor = {
   kind: 'person';
   id: string;
+  clientId: string;
   administratorId: string;
   fullName: string;
   roles: PersonalRole[];
@@ -109,21 +111,16 @@ export class PersonAuthService {
         await manager.getRepository(Person).save(person);
         return { state: 'denied' as const, person, newlyBlocked: person.failedAttempts % 5 === 0 };
       }
-      const roles = (
-        await manager.getRepository(PersonRole).findBy({
-          personId: person.id,
-          administratorId: person.administratorId,
-          roleCode: In([...PERSONAL_ROLES]),
-        })
-      ).map((role) => role.roleCode as PersonalRole);
-      if (!roles.length)
+      const accesses = (await activeClientAccesses(manager, person.id))
+        .filter((access) => access.roles.some((role) => PERSONAL_ROLES.includes(role as PersonalRole)));
+      if (!accesses.length)
         return { state: 'denied' as const, person };
       person.failedAttempts = 0;
       person.lockedUntil = null;
       person.lastAccessAt = now;
       person.updatedAt = now;
       await manager.getRepository(Person).save(person);
-      return { state: 'ok' as const, person, roles };
+      return { state: 'ok' as const, person, accesses };
     });
     if (result.state === 'unknown') {
       await hash(code, 12);
@@ -137,23 +134,27 @@ export class PersonAuthService {
     }
     await this.security.clearCode(code);
     await this.security.event('LOGIN_SUCCESS', ip, result.person.id, result.person.administratorId);
-    return {
-      accessToken: await this.jwt.signAsync(
-        {
-          type: 'person',
-          sub: result.person.id,
-          administratorId: result.person.administratorId,
-          version: String(result.person.sessionVersion),
-        },
-        { expiresIn: '8h' },
-      ),
-      person: {
-        id: result.person.id,
-        administratorId: result.person.administratorId,
-        fullName: result.person.fullName,
-        roles: result.roles,
-      },
+    if (result.accesses.length > 1) return {
+      requiresClientSelection: true,
+      selectionToken: await this.jwt.signAsync({ type: 'person_selection', mode: 'pin', sub: result.person.id,
+        version: String(result.person.sessionVersion) }, { expiresIn: '5m' }),
+      clients: result.accesses.map(({ clientId, name, roles }) => ({ clientId, name,
+        roles: roles.filter((role) => PERSONAL_ROLES.includes(role as PersonalRole)) })),
     };
+    return scopedPersonSession(this.jwt, result.person, result.accesses[0], 'pin');
+  }
+
+  async selectClient(selectionToken: unknown, clientId: unknown) {
+    if (typeof selectionToken !== 'string' || typeof clientId !== 'string')
+      throw new UnauthorizedException('Selección de cliente inválida');
+    try {
+      const payload = await this.jwt.verifyAsync<{ type: string; mode: string; sub: string; version: string }>(selectionToken);
+      if (payload.type !== 'person_selection' || payload.mode !== 'pin') throw new Error('mode');
+      const person = await this.db.getRepository(Person).findOneBy({ id: payload.sub, isActive: true });
+      if (!person || String(person.sessionVersion) !== String(payload.version)) throw new Error('revoked');
+      const access = await activeClientAccess(this.db, person.id, clientId, PERSONAL_ROLES);
+      return scopedPersonSession(this.jwt, person, access, 'pin');
+    } catch { throw new UnauthorizedException('Selección de cliente inválida'); }
   }
 }
 
@@ -172,29 +173,29 @@ export class PersonJwtGuard implements CanActivate {
       const payload = await this.jwt.verifyAsync<{
         type: string;
         sub: string;
-        administratorId: string;
+        administratorId?: string;
+        clientId?: string;
         version: string;
       }>(header.slice(7));
-      if (payload.type !== 'person' || !payload.sub) throw new Error('invalid');
+      if (!['person', 'administrator_person'].includes(payload.type) || !payload.sub) throw new Error('invalid');
       const person = await this.db.getRepository(Person).findOneBy({
         id: payload.sub,
-        administratorId: payload.administratorId,
         isActive: true,
       });
       if (!person || String(person.sessionVersion) !== String(payload.version))
         throw new Error('revoked');
-      const roles = (
-        await this.db.getRepository(PersonRole).findBy({
-          personId: person.id,
-          administratorId: person.administratorId,
-          roleCode: In([...PERSONAL_ROLES]),
-        })
-      ).map((role) => role.roleCode as PersonalRole);
+      const access = payload.clientId
+        ? await activeClientAccess(this.db, person.id, payload.clientId, PERSONAL_ROLES)
+        : legacyClientContext((await activeClientAccesses(this.db, person.id))
+            .filter((item) => item.roles.some((role) => PERSONAL_ROLES.includes(role as PersonalRole))), payload.administratorId);
+      if (payload.administratorId && payload.administratorId !== access.administratorId) throw new Error('owner');
+      const roles = access.roles.filter((role): role is PersonalRole => PERSONAL_ROLES.includes(role as PersonalRole));
       if (!roles.length) throw new Error('role');
       request.actor = {
         kind: 'person',
         id: person.id,
-        administratorId: person.administratorId,
+        clientId: access.clientId,
+        administratorId: access.administratorId,
         fullName: person.fullName,
         roles,
       };
@@ -218,6 +219,7 @@ export class WorkAuthorizationService {
       throw new ForbiddenException('El perfil no permite esta operación');
     const assignment = await this.db.getRepository(WorkAssignment).findOne({
       where: {
+        clientId: actor.clientId,
         administratorId: actor.administratorId,
         personId: actor.id,
         workId,
@@ -227,7 +229,7 @@ export class WorkAuthorizationService {
       relations: { work: true },
       order: { isPrimary: 'DESC', assignedAt: 'ASC' },
     });
-    if (!assignment)
+    if (!assignment || assignment.work.clientId !== actor.clientId || assignment.work.administratorId !== actor.administratorId)
       throw new ForbiddenException('No tenés una asignación activa a la obra');
     return assignment.work;
   }
@@ -240,6 +242,11 @@ export class PersonAuthController {
   @Post('login')
   login(@Body() body: { code?: unknown }, @Req() request: Request) {
     return this.auth.login(body?.code, request.ip ?? 'unknown');
+  }
+
+  @Post('select-client')
+  selectClient(@Body() body: { selectionToken?: unknown; clientId?: unknown }) {
+    return this.auth.selectClient(body?.selectionToken, body?.clientId);
   }
 
   @Get('me')

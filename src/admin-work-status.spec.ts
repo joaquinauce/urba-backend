@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DataSource } from 'typeorm';
 import { AdminService } from './admin.js';
-import { Foreman, Person, PersonRole, Work, WorkAssignment } from './database/entities.js';
+import { ClientMembership, ClientRole, Foreman, Person, PersonRole, Work, WorkAssignment } from './database/entities.js';
 import { localNow } from './shared.js';
 
 function setup(status = 'ACTIVA') {
@@ -50,6 +50,7 @@ describe('edición de responsables de obra', () => {
       [Work, { createQueryBuilder: () => query, save: workSave }],
       [Foreman, { findOneBy: vi.fn(async () => ({ id: 'foreman-2', firstName: 'Pedro', lastName: 'Gómez' })) }],
       [Person, { findOneBy: vi.fn(async () => ({ id: 'person-new' })) }],
+      [PersonRole, { existsBy: vi.fn(async () => true) }],
       [WorkAssignment, { find: vi.fn(async () => [prior]), findOneBy: vi.fn(async () => promoted), save: assignmentSave, insert: vi.fn() }],
     ]);
     const manager = { getRepository: (entity: unknown) => repositories.get(entity) };
@@ -83,7 +84,8 @@ describe('edición de responsables de obra', () => {
     const foremanRepo = { existsBy: vi.fn(async () => true) };
     const repositories = new Map<unknown, unknown>([
       [Work, workRepo], [WorkAssignment, assignmentsRepo], [Person, personRepo],
-      [PersonRole, roleRepo], [Foreman, foremanRepo],
+      [PersonRole, roleRepo], [ClientRole, roleRepo],
+      [ClientMembership, { existsBy: vi.fn(async () => true) }], [Foreman, foremanRepo],
     ]);
     const manager = { getRepository: (entity: unknown) => repositories.get(entity) };
     const db = { ...manager, transaction: async (callback: (tx: typeof manager) => Promise<unknown>) => callback(manager) } as unknown as DataSource;

@@ -19,6 +19,28 @@ const UNIT_CHECK = `unit IN ('UNIDADES','METROS','METROS_CUADRADOS','METROS_CUBI
 const CUSTOM_UNIT_CHECK = `(unit = 'OTRA' AND custom_unit IS NOT NULL AND length(btrim(custom_unit)) > 0) OR (unit <> 'OTRA' AND custom_unit IS NULL)`;
 const CUSTOM_QUANTITY_CHECK = `(quantity_step IS NULL AND quantity_decimals IS NULL) OR (unit = 'OTRA' AND quantity_step IS NOT NULL AND quantity_decimals IS NOT NULL AND quantity_step > 0 AND quantity_decimals BETWEEN 0 AND 3 AND quantity_step * power(10, quantity_decimals) = trunc(quantity_step * power(10, quantity_decimals)))`;
 
+@Entity('clients')
+@Check('clients_name_not_blank', `length(btrim(name)) > 0`)
+@Unique('clients_legacy_administrator_uq', ['legacyAdministratorId'])
+@Unique('clients_legacy_owner_pair_uq', ['legacyAdministratorId', 'id'])
+export class Client {
+  @PrimaryColumn('uuid') id!: string;
+  @Column('varchar', { length: 180 }) name!: string;
+  @Column('varchar', { name: 'contact_phone', length: 40, nullable: true }) contactPhone!: string | null;
+  @Column('varchar', { length: 300, nullable: true }) address!: string | null;
+  @Column('uuid', { name: 'legacy_administrator_id', nullable: true })
+  legacyAdministratorId!: string | null;
+  @Column('boolean', { name: 'is_active', default: true }) isActive!: boolean;
+  @Column('timestamptz', { name: 'created_at', default: () => 'now()' }) createdAt!: Date;
+  @Column('timestamptz', { name: 'updated_at', default: () => 'now()' }) updatedAt!: Date;
+
+  @ManyToOne(() => Administrator, { nullable: true, onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'legacy_administrator_id', referencedColumnName: 'id', foreignKeyConstraintName: 'clients_legacy_administrator_fk' })
+  legacyAdministrator!: Relation<Administrator | null>;
+  @OneToMany(() => ClientMembership, (membership) => membership.client) memberships!: Relation<ClientMembership[]>;
+  @OneToMany(() => Work, (work) => work.client) works!: Relation<Work[]>;
+}
+
 @Entity('administrators')
 @Check('administrators_email_not_blank', `length(btrim(email)) > 0`)
 @Check('administrators_name_not_blank', `length(btrim(full_name)) > 0`)
@@ -78,6 +100,7 @@ export class Foreman {
 
 @Entity('works')
 @Unique('works_administrator_id_id_uq', ['administratorId', 'id'])
+@Unique('works_client_id_id_uq', ['clientId', 'id'])
 @Check(
   'works_access_alias_format',
   `access_alias IS NULL OR (length(access_alias) BETWEEN 4 AND 40 AND access_alias ~ '^[A-Z0-9]+(-[A-Z0-9]+)*$')`,
@@ -107,6 +130,8 @@ export class Foreman {
 export class Work {
   @PrimaryColumn('uuid') id!: string;
   @Column('uuid', { name: 'administrator_id' }) administratorId!: string;
+  // The database fills this from the legacy owner while existing endpoints remain in use.
+  @Column('uuid', { name: 'client_id' }) clientId!: string;
   @Column('uuid', { name: 'foreman_id' }) foremanId!: string;
   @Column('varchar', { length: 180 }) name!: string;
   @Column('text', { nullable: true }) description!: string | null;
@@ -156,6 +181,9 @@ export class Work {
     foreignKeyConstraintName: 'works_administrator_id_fkey',
   })
   administrator!: Relation<Administrator>;
+  @ManyToOne(() => Client, (client) => client.works, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'client_id', referencedColumnName: 'id', foreignKeyConstraintName: 'works_client_fk' })
+  client!: Relation<Client>;
   @ManyToOne(() => Foreman, (foreman) => foreman.primaryWorks, {
     onDelete: 'RESTRICT',
   })
@@ -449,14 +477,8 @@ export class DailyReport {
     nullable: true,
     onDelete: 'RESTRICT',
   })
-  @JoinColumn([
-    {
-      name: 'administrator_id',
-      referencedColumnName: 'administratorId',
-      foreignKeyConstraintName: 'daily_reports_submitted_by_person_fk',
-    },
-    { name: 'submitted_by_person_id', referencedColumnName: 'id' },
-  ])
+  @JoinColumn({ name: 'submitted_by_person_id', referencedColumnName: 'id',
+    foreignKeyConstraintName: 'daily_reports_submitted_by_person_fk' })
   submittedByPerson!: Relation<Person | null>;
   @OneToMany(() => DailyReportItem, (item) => item.report) items!: Relation<
     DailyReportItem[]
@@ -765,10 +787,80 @@ export class Person {
   foremanSource!: Relation<Foreman | null>;
   @OneToMany(() => PersonRole, (assignment) => assignment.person)
   roles!: Relation<PersonRole[]>;
+  // administratorId remains the legacy home owner; memberships express client access.
+  @OneToMany(() => ClientMembership, (membership) => membership.person)
+  clientMemberships!: Relation<ClientMembership[]>;
   @OneToMany(() => WorkAssignment, (assignment) => assignment.person)
   workAssignments!: Relation<WorkAssignment[]>;
   @OneToMany(() => DailyReport, (report) => report.submittedByPerson)
   submittedReports!: Relation<DailyReport[]>;
+}
+
+@Entity('client_memberships')
+@Index('client_memberships_person_idx', ['personId', 'isActive'])
+export class ClientMembership {
+  @PrimaryColumn('uuid', { name: 'client_id' }) clientId!: string;
+  @PrimaryColumn('uuid', { name: 'person_id' }) personId!: string;
+  @Column('boolean', { name: 'is_active', default: true }) isActive!: boolean;
+  @Column('timestamptz', { name: 'created_at', default: () => 'now()' }) createdAt!: Date;
+  @Column('timestamptz', { name: 'updated_at', default: () => 'now()' }) updatedAt!: Date;
+
+  @ManyToOne(() => Client, (client) => client.memberships, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'client_id', referencedColumnName: 'id', foreignKeyConstraintName: 'client_memberships_client_fk' })
+  client!: Relation<Client>;
+  @ManyToOne(() => Person, (person) => person.clientMemberships, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'person_id', referencedColumnName: 'id', foreignKeyConstraintName: 'client_memberships_person_fk' })
+  person!: Relation<Person>;
+  @OneToMany(() => ClientRole, (role) => role.membership) roles!: Relation<ClientRole[]>;
+}
+
+@Entity('client_roles')
+@Check('client_roles_code_valid', `role_code IN ('ADMINISTRATOR','SITE_MANAGER','FOREMAN')`)
+@Index('client_roles_person_idx', ['personId', 'roleCode'])
+export class ClientRole {
+  @PrimaryColumn('uuid', { name: 'client_id' }) clientId!: string;
+  @PrimaryColumn('uuid', { name: 'person_id' }) personId!: string;
+  @PrimaryColumn('varchar', { name: 'role_code', length: 40 }) roleCode!: string;
+  @Column('timestamptz', { name: 'created_at', default: () => 'now()' }) createdAt!: Date;
+
+  @ManyToOne(() => ClientMembership, (membership) => membership.roles, { onDelete: 'RESTRICT' })
+  @JoinColumn([
+    { name: 'client_id', referencedColumnName: 'clientId', foreignKeyConstraintName: 'client_roles_membership_fk' },
+    { name: 'person_id', referencedColumnName: 'personId' },
+  ])
+  membership!: Relation<ClientMembership>;
+  @ManyToOne(() => Role, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'role_code', referencedColumnName: 'code', foreignKeyConstraintName: 'client_roles_role_fk' })
+  role!: Relation<Role>;
+  @OneToMany(() => WorkAssignment, (assignment) => assignment.clientRole)
+  workAssignments!: Relation<WorkAssignment[]>;
+}
+
+@Entity('client_invitations')
+@Check('client_invitations_role_valid', `role_code IN ('ADMINISTRATOR','SITE_MANAGER','FOREMAN')`)
+@Check('client_invitations_dates_valid', `expires_at > created_at`)
+@Index('client_invitations_token_hash_uq', ['tokenHash'], { unique: true })
+@Index('client_invitations_person_pending_idx', ['personId', 'acceptedAt', 'revokedAt'])
+export class ClientInvitation {
+  @PrimaryColumn('uuid') id!: string;
+  @Column('uuid', { name: 'client_id' }) clientId!: string;
+  @Column('uuid', { name: 'person_id' }) personId!: string;
+  @Column('varchar', { name: 'role_code', length: 40 }) roleCode!: string;
+  @Column('char', { name: 'token_hash', length: 64, select: false }) tokenHash!: string;
+  @Column('timestamptz', { name: 'expires_at' }) expiresAt!: Date;
+  @Column('timestamptz', { name: 'accepted_at', nullable: true }) acceptedAt!: Date | null;
+  @Column('timestamptz', { name: 'revoked_at', nullable: true }) revokedAt!: Date | null;
+  @Column('timestamptz', { name: 'created_at', default: () => 'now()' }) createdAt!: Date;
+
+  @ManyToOne(() => Client, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'client_id', referencedColumnName: 'id', foreignKeyConstraintName: 'client_invitations_client_fk' })
+  client!: Relation<Client>;
+  @ManyToOne(() => Person, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'person_id', referencedColumnName: 'id', foreignKeyConstraintName: 'client_invitations_person_fk' })
+  person!: Relation<Person>;
+  @ManyToOne(() => Role, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'role_code', referencedColumnName: 'code', foreignKeyConstraintName: 'client_invitations_role_fk' })
+  role!: Relation<Role>;
 }
 
 @Entity('person_roles')
@@ -832,6 +924,7 @@ export class WorkAssignment {
   @Column('varchar', { name: 'role_code', length: 40 })
   roleCode!: string;
   @Column('uuid', { name: 'administrator_id' }) administratorId!: string;
+  @Column('uuid', { name: 'client_id' }) clientId!: string;
   @Column('boolean', { name: 'is_primary', default: false })
   isPrimary!: boolean;
   @Column('timestamptz', { name: 'assigned_at', default: () => 'now()' })
@@ -855,16 +948,24 @@ export class WorkAssignment {
     { name: 'work_id', referencedColumnName: 'id' },
   ])
   work!: Relation<Work>;
+  @ManyToOne(() => ClientRole, (role) => role.workAssignments, {
+    nullable: true, createForeignKeyConstraints: false,
+  })
+  @JoinColumn([
+    { name: 'client_id', referencedColumnName: 'clientId', foreignKeyConstraintName: 'work_assignments_client_role_fk' },
+    { name: 'person_id', referencedColumnName: 'personId' },
+    { name: 'role_code', referencedColumnName: 'roleCode' },
+  ])
+  clientRole!: Relation<ClientRole | null>;
   @ManyToOne(() => Person, (person) => person.workAssignments, {
     createForeignKeyConstraints: false,
   })
   @JoinColumn([
-    { name: 'administrator_id', referencedColumnName: 'administratorId' },
     { name: 'person_id', referencedColumnName: 'id' },
   ])
   person!: Relation<Person>;
   @ManyToOne(() => PersonRole, (personRole) => personRole.workAssignments, {
-    onDelete: 'RESTRICT',
+    nullable: true, createForeignKeyConstraints: false,
   })
   @JoinColumn([
     {
@@ -875,10 +976,11 @@ export class WorkAssignment {
     { name: 'person_id', referencedColumnName: 'personId' },
     { name: 'role_code', referencedColumnName: 'roleCode' },
   ])
-  personRole!: Relation<PersonRole>;
+  personRole!: Relation<PersonRole | null>;
 }
 
 export const entities = [
+  Client,
   Administrator,
   Foreman,
   Work,
@@ -891,6 +993,9 @@ export const entities = [
   ReportCorrection,
   Role,
   Person,
+  ClientMembership,
+  ClientRole,
+  ClientInvitation,
   PersonRole,
   WorkAssignment,
 ] as const;
